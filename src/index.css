@@ -1,0 +1,126 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --font-display: 'Outfit', system-ui, sans-serif;
+  --font-body: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --accent-color: #7ebcff;
+}
+
+body {
+  font-family: var(--font-body);
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1, h2, h3, .font-display {
+  font-family: var(--font-display);
+  text-wrap: balance;
+}
+
+.font-mono-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Textures de plateau */
+.board-tex-wood .cell-light {
+  background: linear-gradient(135deg, #ead1a7 0%, #d4a66a 100%);
+}
+.board-tex-wood .cell-dark {
+  background: linear-gradient(135deg, #8e5e36 0%, #684023 100%);
+}
+
+.board-tex-stone .cell-light {
+  background: linear-gradient(135deg, #dcdcdc 0%, #b8bcc2 100%);
+}
+.board-tex-stone .cell-dark {
+  background: linear-gradient(135deg, #747a84 0%, #525861 100%);
+}
+
+.board-tex-marble .cell-light {
+  background: linear-gradient(135deg, #f3f1ec 0%, #d4dae3 100%);
+}
+.board-tex-marble .cell-dark {
+  background: linear-gradient(135deg, #637085 0%, #414c5e 100%);
+}
+
+.board-tex-metal .cell-light {
+  background: linear-gradient(135deg, #d3dfe8 0%, #98a9b7 100%);
+}
+.board-tex-metal .cell-dark {
+  background: linear-gradient(135deg, #546574 0%, #34414e 100%);
+}
+
+.board-tex-night .cell-light {
+  background: #bcc6d8;
+}
+.board-tex-night .cell-dark {
+  background: #253048;
+}
+
+.cell-blocked {
+  background: repeating-linear-gradient(
+    135deg,
+    #2f3744,
+    #2f3744 6px,
+    #1d232d 6px,
+    #1d232d 12px
+  ) !important;
+}
+
+/* Contraste garanti pour chaque camp, quelle que soit la texture de pièce */
+.piece-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  user-select: none;
+  pointer-events: none;
+  font-weight: 800;
+  paint-order: stroke fill;
+  font-variant-emoji: text;
+}
+.piece-side-white {
+  color: #ffffff;
+  -webkit-text-stroke: 2.4px #18202c;
+  text-shadow: 0 1px 3px rgba(15, 23, 42, 0.7);
+}
+.piece-side-black {
+  color: #141821;
+  -webkit-text-stroke: 1.8px #e8eef7;
+  text-shadow: 0 1px 2px rgba(241, 245, 249, 0.55);
+}
+.piece-side-red {
+  color: #ef4444;
+  -webkit-text-stroke: 1.1px #2b0b0b;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.piece-side-blue {
+  color: #38bdf8;
+  -webkit-text-stroke: 1.1px #0c233a;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.piece-side-green {
+  color: #34d399;
+  -webkit-text-stroke: 1.1px #062b1e;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.piece-side-gold {
+  color: #fbbf24;
+  -webkit-text-stroke: 1.1px #362205;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.piece-tex-wood {
+  filter: drop-shadow(0 1px 2px rgba(139, 90, 32, 0.7));
+}
+.piece-tex-stone {
+  filter: drop-shadow(0 1px 2px rgba(104, 113, 125, 0.7));
+}
+.piece-tex-metal {
+  filter: drop-shadow(0 1px 2px rgba(100, 125, 145, 0.85));
+}
+.piece-tex-marble {
+  filter: drop-shadow(0 1px 2px rgba(166, 172, 182, 0.8));
+}

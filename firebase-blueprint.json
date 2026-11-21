@@ -1,0 +1,467 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Cloud profile and personal ÉOL stats owned by an authenticated user (zero PII stored).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "nickname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "avatarColor": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "avatarSymbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8
+        },
+        "eol": {
+          "type": "number"
+        },
+        "gamesPlayed": {
+          "type": "integer"
+        },
+        "wins": {
+          "type": "integer"
+        },
+        "draws": {
+          "type": "integer"
+        },
+        "losses": {
+          "type": "integer"
+        },
+        "discoveredVariants": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "nickname",
+        "avatarColor",
+        "avatarSymbol",
+        "eol",
+        "gamesPlayed",
+        "wins",
+        "draws",
+        "losses",
+        "discoveredVariants",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Public non-PII leaderboard summary card for a player.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "nickname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "avatarColor": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "avatarSymbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8
+        },
+        "eol": {
+          "type": "number"
+        },
+        "gamesPlayed": {
+          "type": "integer"
+        },
+        "wins": {
+          "type": "integer"
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "nickname",
+        "avatarColor",
+        "avatarSymbol",
+        "eol",
+        "gamesPlayed",
+        "wins",
+        "isPublic",
+        "updatedAt"
+      ]
+    },
+    "VariantDoc": {
+      "title": "VariantDoc",
+      "description": "Chess Lab custom or starter variant stored natively in Firestore.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["private", "public", "link"]
+        },
+        "players": {
+          "type": "integer"
+        },
+        "difficulty": {
+          "type": "string",
+          "enum": ["Très simple", "Simple", "Moyenne", "Complexe", "Extrême"]
+        },
+        "controlledDifficulty": {
+          "type": "string",
+          "enum": ["Très simple", "Simple", "Moyenne", "Complexe", "Extrême"]
+        },
+        "victoryType": {
+          "type": "string",
+          "enum": ["checkmate_or_king", "eliminate_all", "king_of_hill", "capture_count", "custom"]
+        },
+        "captureTarget": {
+          "type": "integer"
+        },
+        "goal": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "actions": {
+          "type": "integer"
+        },
+        "duration": {
+          "type": "integer"
+        },
+        "turnOrder": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "rules": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "ruleConstraints": {
+          "type": "object"
+        },
+        "board": {
+          "type": "object"
+        },
+        "pieces": {
+          "type": "array"
+        },
+        "customPieceDefs": {
+          "type": "array"
+        },
+        "setup": {
+          "type": "object"
+        },
+        "creatorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "games": {
+          "type": "integer"
+        },
+        "ratingSum": {
+          "type": "number"
+        },
+        "ratingCount": {
+          "type": "integer"
+        },
+        "parentId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "parentName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "rootId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "commentsEnabled": {
+          "type": "boolean"
+        },
+        "versions": {
+          "type": "array"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "visibility",
+        "players",
+        "difficulty",
+        "controlledDifficulty",
+        "victoryType",
+        "goal",
+        "actions",
+        "duration",
+        "turnOrder",
+        "rules",
+        "board",
+        "pieces",
+        "customPieceDefs",
+        "setup",
+        "creatorUid",
+        "creator",
+        "games",
+        "ratingSum",
+        "ratingCount",
+        "commentsEnabled",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VariantRating": {
+      "title": "VariantRating",
+      "description": "Per-user 1-to-5 star rating for a variant (1 document per raterUid).",
+      "type": "object",
+      "properties": {
+        "raterUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "variantId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "stars": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "raterUid",
+        "variantId",
+        "stars",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VariantComment": {
+      "title": "VariantComment",
+      "description": "Comment posted on a public or link-shared variant when comments are enabled.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "variantId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "isVisible": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "variantId",
+        "authorUid",
+        "authorName",
+        "text",
+        "isVisible",
+        "createdAt"
+      ]
+    },
+    "GameHistoryDoc": {
+      "title": "GameHistoryDoc",
+      "description": "Completed game record owned by an authenticated player.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "playerUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["local", "ai", "online", "analysis"]
+        },
+        "variantId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "variantName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "opponentName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 48
+        },
+        "result": {
+          "type": "string",
+          "enum": ["win", "loss", "draw", "saved"]
+        },
+        "movesCount": {
+          "type": "integer"
+        },
+        "deltaEol": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "playerUid",
+        "mode",
+        "variantName",
+        "opponentName",
+        "result",
+        "movesCount",
+        "deltaEol",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Private cloud profile & ÉOL state for an authenticated user (zero PII)."
+    },
+    "/users/{userId}/games/{gameId}": {
+      "schema": {
+        "$ref": "#/entities/GameHistoryDoc"
+      },
+      "description": "Immutable completed game records belonging to the user."
+    },
+    "/leaderboard/{userId}": {
+      "schema": {
+        "$ref": "#/entities/LeaderboardEntry"
+      },
+      "description": "Public leaderboard cards without PII."
+    },
+    "/variants/{variantId}": {
+      "schema": {
+        "$ref": "#/entities/VariantDoc"
+      },
+      "description": "User-created and shared variants with visibility controls."
+    },
+    "/variants/{variantId}/ratings/{raterUid}": {
+      "schema": {
+        "$ref": "#/entities/VariantRating"
+      },
+      "description": "One rating document per user per variant, atomically synchronized with parent rating totals."
+    },
+    "/variants/{variantId}/comments/{commentId}": {
+      "schema": {
+        "$ref": "#/entities/VariantComment"
+      },
+      "description": "Comments on public or link-shared variants where commentsEnabled is true."
+    }
+  }
+}

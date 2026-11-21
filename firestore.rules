@@ -1,0 +1,396 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 3: Global Security Primitives
+    // -------------------------------------------------------------------------
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isHexColor(val) {
+      return val is string && val.size() == 7 && val.matches('^#[0-9a-fA-F]{6}$');
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 2 & 4: Validation Blueprints (Anti-Update-Gap)
+    // -------------------------------------------------------------------------
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+          'uid', 'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'draws', 'losses',
+          'discoveredVariants', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'draws', 'losses',
+          'discoveredVariants', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 32
+        && isHexColor(data.avatarColor)
+        && data.avatarSymbol is string && data.avatarSymbol.size() >= 1 && data.avatarSymbol.size() <= 8
+        && data.eol is number && data.eol >= 100 && data.eol <= 5000
+        && data.gamesPlayed is int && data.gamesPlayed >= 0 && data.gamesPlayed <= 1000000
+        && data.wins is int && data.wins >= 0 && data.wins <= 1000000
+        && data.draws is int && data.draws >= 0 && data.draws <= 1000000
+        && data.losses is int && data.losses >= 0 && data.losses <= 1000000
+        && data.discoveredVariants is list && data.discoveredVariants.size() <= 500
+        && (data.discoveredVariants.size() == 0 || (data.discoveredVariants[0] is string && data.discoveredVariants[0].size() <= 128))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLeaderboardEntry(data) {
+      return data.keys().hasAll([
+          'uid', 'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'isPublic', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'isPublic', 'updatedAt'
+        ])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 32
+        && isHexColor(data.avatarColor)
+        && data.avatarSymbol is string && data.avatarSymbol.size() >= 1 && data.avatarSymbol.size() <= 8
+        && data.eol is number && data.eol >= 100 && data.eol <= 5000
+        && data.gamesPlayed is int && data.gamesPlayed >= 0 && data.gamesPlayed <= 1000000
+        && data.wins is int && data.wins >= 0 && data.wins <= 1000000
+        && data.isPublic is bool
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidBoardMap(board) {
+      return board is map
+        && board.keys().hasAll([
+          'rows', 'cols', 'cells', 'blocked', 'special',
+          'specialEffect', 'texture', 'light', 'dark', 'rotation'
+        ])
+        && board.keys().hasOnly([
+          'id', 'name', 'rows', 'cols', 'cells', 'blocked', 'special',
+          'specialEffectType', 'specialEffect', 'texture', 'light', 'dark', 'rotation'
+        ])
+        && board.rows is int && board.rows >= 2 && board.rows <= 16
+        && board.cols is int && board.cols >= 2 && board.cols <= 16
+        && board.cells is list && board.cells.size() >= 4 && board.cells.size() <= 256
+        && board.cells[0] is int
+        && board.blocked is list && board.blocked.size() >= 4 && board.blocked.size() <= 256
+        && board.blocked[0] is int
+        && board.special is list && board.special.size() >= 4 && board.special.size() <= 256
+        && board.special[0] is int
+        && board.specialEffect is string && board.specialEffect.size() <= 300
+        && board.texture in ['plain', 'wood', 'stone', 'marble', 'metal', 'night']
+        && isHexColor(board.light)
+        && isHexColor(board.dark)
+        && board.rotation is number && board.rotation >= 0 && board.rotation <= 360;
+    }
+
+    function isValidVariant(data) {
+      return data.keys().hasAll([
+          'id', 'name', 'description', 'visibility', 'players',
+          'difficulty', 'controlledDifficulty', 'victoryType', 'goal',
+          'actions', 'duration', 'turnOrder', 'rules',
+          'board', 'pieces', 'customPieceDefs', 'setup',
+          'creatorUid', 'creator', 'games', 'ratingSum', 'ratingCount',
+          'commentsEnabled', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'description', 'visibility', 'players',
+          'difficulty', 'controlledDifficulty', 'victoryType', 'captureTarget', 'goal',
+          'actions', 'duration', 'turnOrder', 'rules', 'ruleConstraints',
+          'board', 'pieces', 'customPieceDefs', 'setup',
+          'creatorUid', 'creator', 'games', 'ratingSum', 'ratingCount',
+          'parentId', 'parentName', 'rootId', 'commentsEnabled', 'versions',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id)
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 80
+        && data.description is string && data.description.size() <= 600
+        && data.visibility in ['private', 'public', 'link']
+        && data.players is int && data.players >= 2 && data.players <= 6
+        && data.difficulty in ['Très simple', 'Simple', 'Moyenne', 'Complexe', 'Extrême']
+        && data.controlledDifficulty in ['Très simple', 'Simple', 'Moyenne', 'Complexe', 'Extrême']
+        && data.victoryType in ['checkmate_or_king', 'eliminate_all', 'king_of_hill', 'capture_count', 'custom']
+        && (!('captureTarget' in data) || (data.captureTarget is int && data.captureTarget >= 1 && data.captureTarget <= 64))
+        && data.goal is string && data.goal.size() <= 300
+        && data.actions is int && data.actions >= 1 && data.actions <= 10
+        && data.duration is int && data.duration >= 0 && data.duration <= 180
+        && data.turnOrder is string && data.turnOrder.size() <= 120
+        && data.rules is string && data.rules.size() <= 2000
+        && (!('ruleConstraints' in data) || (data.ruleConstraints is map && data.ruleConstraints.size() <= 32))
+        && isValidBoardMap(data.board)
+        && data.pieces is list && data.pieces.size() <= 64
+        && (data.pieces.size() == 0 || (data.pieces[0] is string && data.pieces[0].size() <= 128))
+        && data.customPieceDefs is list && data.customPieceDefs.size() <= 64
+        && (data.customPieceDefs.size() == 0 || data.customPieceDefs[0] is map)
+        && data.setup is map && data.setup.size() <= 256
+        && isValidId(data.creatorUid)
+        && data.creator is string && data.creator.size() >= 1 && data.creator.size() <= 32
+        && data.games is int && data.games >= 0 && data.games <= 10000000
+        && data.ratingSum is number && data.ratingSum >= 0 && data.ratingSum <= 50000000
+        && data.ratingCount is int && data.ratingCount >= 0 && data.ratingCount <= 10000000
+        && (!('parentId' in data) || data.parentId == null || isValidId(data.parentId))
+        && (!('parentName' in data) || data.parentName == null || (data.parentName is string && data.parentName.size() <= 80))
+        && (!('rootId' in data) || data.rootId == null || isValidId(data.rootId))
+        && data.commentsEnabled is bool
+        && (!('versions' in data) || (data.versions is list && data.versions.size() <= 100 && (data.versions.size() == 0 || data.versions[0] is map)))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVariantRating(data, variantId, raterUid) {
+      return data.keys().hasAll(['raterUid', 'variantId', 'stars', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['raterUid', 'variantId', 'stars', 'createdAt', 'updatedAt'])
+        && isValidId(data.raterUid) && data.raterUid == raterUid && data.raterUid == request.auth.uid
+        && isValidId(data.variantId) && data.variantId == variantId
+        && data.stars is int && data.stars >= 1 && data.stars <= 5
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVariantComment(data, variantId, commentId) {
+      return data.keys().hasAll(['id', 'variantId', 'authorUid', 'authorName', 'text', 'isVisible', 'createdAt'])
+        && data.keys().hasOnly(['id', 'variantId', 'authorUid', 'authorName', 'text', 'isVisible', 'createdAt'])
+        && isValidId(data.id) && data.id == commentId
+        && isValidId(data.variantId) && data.variantId == variantId
+        && isValidId(data.authorUid) && data.authorUid == request.auth.uid
+        && data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 32
+        && data.text is string && data.text.size() >= 1 && data.text.size() <= 500
+        && data.isVisible is bool && data.isVisible == true
+        && data.createdAt is timestamp;
+    }
+
+    function isValidGameHistory(data, userId, gameId) {
+      return data.keys().hasAll([
+          'id', 'playerUid', 'mode', 'variantName', 'opponentName',
+          'result', 'movesCount', 'deltaEol', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'playerUid', 'mode', 'variantId', 'variantName',
+          'opponentName', 'result', 'movesCount', 'deltaEol', 'createdAt'
+        ])
+        && isValidId(data.id) && data.id == gameId
+        && isValidId(data.playerUid) && data.playerUid == userId && data.playerUid == request.auth.uid
+        && data.mode in ['local', 'ai', 'online', 'analysis']
+        && (!('variantId' in data) || data.variantId == null || isValidId(data.variantId))
+        && data.variantName is string && data.variantName.size() >= 1 && data.variantName.size() <= 80
+        && data.opponentName is string && data.opponentName.size() >= 1 && data.opponentName.size() <= 48
+        && data.result in ['win', 'loss', 'draw', 'saved']
+        && data.movesCount is int && data.movesCount >= 0 && data.movesCount <= 5000
+        && data.deltaEol is number && data.deltaEol >= -200 && data.deltaEol <= 200
+        && data.createdAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Match Rules
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'draws', 'losses',
+          'discoveredVariants', 'updatedAt'
+        ]);
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /games/{gameId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(gameId);
+        allow list: if isOwner(userId) && resource.data.playerUid == request.auth.uid;
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(gameId)
+          && isValidGameHistory(incoming(), userId, gameId)
+          && incoming().createdAt == request.time;
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(gameId);
+      }
+    }
+
+    match /leaderboard/{userId} {
+      allow get: if isValidId(userId) && (resource.data.isPublic == true || isOwner(userId));
+      allow list: if resource.data.isPublic == true;
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidLeaderboardEntry(incoming())
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidLeaderboardEntry(incoming())
+        && incoming().uid == existing().uid
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'isPublic', 'updatedAt'
+        ]);
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    match /variants/{variantId} {
+      allow get: if isValidId(variantId) && (
+        resource.data.visibility == 'public'
+        || resource.data.visibility == 'link'
+        || (isSignedIn() && resource.data.creatorUid == request.auth.uid)
+      );
+      allow list: if resource.data.visibility == 'public'
+        || (isSignedIn() && resource.data.creatorUid == request.auth.uid);
+
+      allow create: if isVerifiedUser()
+        && isValidId(variantId)
+        && isValidVariant(incoming())
+        && incoming().id == variantId
+        && incoming().creatorUid == request.auth.uid
+        && incoming().games == 0
+        && incoming().ratingSum == 0
+        && incoming().ratingCount == 0
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(variantId)
+        && isValidVariant(incoming())
+        && incoming().id == existing().id
+        && incoming().creatorUid == existing().creatorUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action 1: Creator updates variant metadata / rules / visibility
+          (
+            existing().creatorUid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'description', 'visibility', 'players',
+              'difficulty', 'controlledDifficulty', 'victoryType', 'captureTarget', 'goal',
+              'actions', 'duration', 'turnOrder', 'rules', 'ruleConstraints',
+              'board', 'pieces', 'customPieceDefs', 'setup',
+              'creator', 'commentsEnabled', 'versions', 'updatedAt'
+            ])
+          )
+          // Action 2: Authenticated player increments popularity after a completed game
+          || (
+            (existing().visibility == 'public' || existing().visibility == 'link')
+            && incoming().games == existing().games + 1
+            && incoming().diff(existing()).affectedKeys().hasOnly(['games', 'updatedAt'])
+          )
+          // Action 3: Authenticated player atomically updates rating totals alongside their rating doc
+          || (
+            (existing().visibility == 'public' || existing().visibility == 'link')
+            && incoming().diff(existing()).affectedKeys().hasOnly(['ratingSum', 'ratingCount', 'updatedAt'])
+            && (
+              (
+                !exists(/databases/$(database)/documents/variants/$(variantId)/ratings/$(request.auth.uid))
+                && existsAfter(/databases/$(database)/documents/variants/$(variantId)/ratings/$(request.auth.uid))
+                && incoming().ratingCount == existing().ratingCount + 1
+                && incoming().ratingSum >= existing().ratingSum + 1
+                && incoming().ratingSum <= existing().ratingSum + 5
+              )
+              || (
+                exists(/databases/$(database)/documents/variants/$(variantId)/ratings/$(request.auth.uid))
+                && existsAfter(/databases/$(database)/documents/variants/$(variantId)/ratings/$(request.auth.uid))
+                && incoming().ratingCount == existing().ratingCount
+                && incoming().ratingSum >= existing().ratingSum - 4
+                && incoming().ratingSum <= existing().ratingSum + 4
+              )
+            )
+          )
+        );
+
+      allow delete: if isVerifiedUser()
+        && isValidId(variantId)
+        && existing().creatorUid == request.auth.uid;
+
+      match /ratings/{raterUid} {
+        allow get: if isVerifiedUser()
+          && isValidId(variantId)
+          && isValidId(raterUid)
+          && request.auth.uid == raterUid;
+
+        allow create: if isVerifiedUser()
+          && isValidId(variantId)
+          && isValidId(raterUid)
+          && request.auth.uid == raterUid
+          && isValidVariantRating(incoming(), variantId, raterUid)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/variants/$(variantId))
+          && get(/databases/$(database)/documents/variants/$(variantId)).data.visibility in ['public', 'link']
+          && getAfter(/databases/$(database)/documents/variants/$(variantId)).data.ratingCount
+             == get(/databases/$(database)/documents/variants/$(variantId)).data.ratingCount + 1
+          && getAfter(/databases/$(database)/documents/variants/$(variantId)).data.ratingSum
+             == get(/databases/$(database)/documents/variants/$(variantId)).data.ratingSum + incoming().stars;
+
+        allow update: if isVerifiedUser()
+          && isValidId(variantId)
+          && isValidId(raterUid)
+          && request.auth.uid == raterUid
+          && isValidVariantRating(incoming(), variantId, raterUid)
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['stars', 'updatedAt'])
+          && exists(/databases/$(database)/documents/variants/$(variantId))
+          && get(/databases/$(database)/documents/variants/$(variantId)).data.visibility in ['public', 'link']
+          && getAfter(/databases/$(database)/documents/variants/$(variantId)).data.ratingCount
+             == get(/databases/$(database)/documents/variants/$(variantId)).data.ratingCount
+          && getAfter(/databases/$(database)/documents/variants/$(variantId)).data.ratingSum
+             == get(/databases/$(database)/documents/variants/$(variantId)).data.ratingSum + (incoming().stars - existing().stars);
+      }
+
+      match /comments/{commentId} {
+        allow get: if isValidId(variantId) && isValidId(commentId) && resource.data.isVisible == true;
+        allow list: if resource.data.isVisible == true;
+        allow create: if isVerifiedUser()
+          && isValidId(variantId)
+          && isValidId(commentId)
+          && isValidVariantComment(incoming(), variantId, commentId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/variants/$(variantId))
+          && get(/databases/$(database)/documents/variants/$(variantId)).data.visibility in ['public', 'link']
+          && get(/databases/$(database)/documents/variants/$(variantId)).data.commentsEnabled == true;
+        allow delete: if isVerifiedUser()
+          && isValidId(variantId)
+          && isValidId(commentId)
+          && (
+            existing().authorUid == request.auth.uid
+            || get(/databases/$(database)/documents/variants/$(variantId)).data.creatorUid == request.auth.uid
+          );
+      }
+    }
+  }
+}

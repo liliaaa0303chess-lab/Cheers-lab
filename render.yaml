@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: chess-lab
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: NODE_ENV=production npm start
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: "3000"
+      - key: NODE_VERSION
+        value: "22"
