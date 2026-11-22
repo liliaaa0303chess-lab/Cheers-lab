@@ -6,6 +6,7 @@ import {
   getDoc,
   getDocs,
   limit,
+  onSnapshot,
   query,
   serverTimestamp,
   setDoc,
@@ -23,6 +24,7 @@ import type {
   Variant,
   VariantComment,
 } from '../types/chess';
+import { safeUuid } from './safeId';
 
 export interface LeaderboardCard {
   uid: string;
@@ -258,7 +260,7 @@ export async function fetchPublicVariantsFromFirestore(): Promise<Variant[]> {
     const q = query(
       collection(db, 'variants'),
       where('visibility', '==', 'public'),
-      limit(60)
+      limit(100)
     );
     const snap = await getDocs(q);
     const list = snap.docs.map((docSnap) =>
@@ -268,6 +270,37 @@ export async function fetchPublicVariantsFromFirestore(): Promise<Variant[]> {
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, path);
   }
+}
+
+export function subscribePublicVariantsFromFirestore(
+  onVariants: (variants: Variant[]) => void,
+  onError?: (error: unknown) => void
+): () => void {
+  const q = query(
+    collection(db, 'variants'),
+    where('visibility', '==', 'public'),
+    limit(100)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((docSnap) => docToVariant(docSnap.id, docSnap.data() as Record<string, unknown>))
+        .sort((a, b) => (b.games || 0) - (a.games || 0));
+      onVariants(list);
+    },
+    (error) => {
+      if (onError) {
+        onError(error);
+      } else {
+        try {
+          handleFirestoreError(error, OperationType.LIST, 'variants');
+        } catch (err) {
+          console.warn('Firestore public variants subscription warning:', err);
+        }
+      }
+    }
+  );
 }
 
 export async function fetchVariantByIdFromFirestore(
@@ -508,7 +541,7 @@ export async function addCommentToFirestore(
 ): Promise<VariantComment | null> {
   if (!user.emailVerified) return null;
   const safeVariantId = sanitizeId(variantId, 'var');
-  const commentId = sanitizeId(`c_${crypto.randomUUID().slice(0, 10)}`, 'c');
+  const commentId = sanitizeId(`c_${safeUuid().slice(0, 10)}`, 'c');
   const path = `variants/${safeVariantId}/comments/${commentId}`;
 
   try {
@@ -581,13 +614,17 @@ export async function fetchLeaderboardFromFirestore(): Promise<LeaderboardCard[]
     const q = query(
       collection(db, 'leaderboard'),
       where('isPublic', '==', true),
-      limit(50)
+      limit(500)
     );
     const snap = await getDocs(q);
     return snap.docs
       .map((d) => d.data() as LeaderboardCard)
-      .sort((a, b) => (b.eol || 0) - (a.eol || 0))
-      .slice(0, 20);
+      .sort(
+        (a, b) =>
+          (b.eol || 0) - (a.eol || 0) ||
+          (b.wins || 0) - (a.wins || 0) ||
+          (b.gamesPlayed || 0) - (a.gamesPlayed || 0)
+      );
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, path);
   }

@@ -7,12 +7,18 @@ import type {
   Variant,
 } from '../types/chess.ts';
 import {
+  areSidesAllied,
   canPieceCaptureTarget,
   compileVariantRules,
   doesPieceMatchFilter,
+  formatTeamLabel,
+  getRemainingTeamGroups,
+  getTeamSides,
+  isPieceBackwardCaptureForbidden,
   isPieceBackwardForbidden,
   isPieceSidewaysForbidden,
   isSpecialEntryAllowed,
+  isSquareColorAllowed,
   parsePieceTextConfig,
   type CompiledVariantRules,
 } from './ruleParser.ts';
@@ -69,6 +75,7 @@ export interface GameState {
   lastMove: { from: number; to: number; description?: string } | null;
   moveHistory: string[];
   winner: PlayerSide | 'draw' | null;
+  winningTeam?: PlayerSide[] | null;
   endReason: string | null;
   inCheckSides: PlayerSide[];
   customPieceMap: Record<string, PieceDef>;
@@ -253,6 +260,7 @@ export function createInitialGameState(
     lastMove: null,
     moveHistory: [],
     winner: null,
+    winningTeam: null,
     endReason: null,
     inCheckSides: [],
     customPieceMap,
@@ -273,6 +281,7 @@ export function cloneGameState(state: GameState): GameState {
     pieces,
     activeSides: [...state.activeSides],
     eliminatedSides: [...state.eliminatedSides],
+    winningTeam: state.winningTeam ? [...state.winningTeam] : null,
     capturesCount: { ...state.capturesCount },
     checksDelivered: { ...(state.checksDelivered || { white: 0, black: 0, red: 0, blue: 0, green: 0, gold: 0 }) },
     moveHistory: [...state.moveHistory],
@@ -412,12 +421,21 @@ function getPseudoMovesForPiece(
   state: GameState,
   from: number,
   forAttackCheck = false,
-  ignoreVariantRules = false
+  ignoreVariantRules = false,
+  forDefenseCheck = false
 ): LegalMove[] {
   const piece = state.pieces[from];
   if (!piece || piece.frozenTurns > 0) return [];
 
   const rules = getStateRules(state);
+  if (
+    !ignoreVariantRules &&
+    !forDefenseCheck &&
+    rules.immobilePieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))
+  ) {
+    return [];
+  }
+
   const customDef = state.customPieceMap[piece.pieceId];
   const allCustomPieces = Object.values(state.customPieceMap || {});
   const { rows, cols } = state.board;
@@ -426,14 +444,19 @@ function getPseudoMovesForPiece(
   const [fdr, fdc] = getForwardDirection(piece.side);
   const moves: LegalMove[] = [];
 
+  const jumpForbidden =
+    !ignoreVariantRules &&
+    rules.forbidJumpPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side));
+
   const globalCanJump =
     !ignoreVariantRules &&
+    !jumpForbidden &&
     (rules.allCanJump ||
-      rules.canJumpPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f)));
+      rules.canJumpPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side)));
 
   const pieceStepCap = !ignoreVariantRules
     ? Object.entries(rules.pieceMaxSteps).reduce((acc, [filter, cap]) => {
-        if (cap > 0 && doesPieceMatchFilter(piece.pieceId, filter)) {
+        if (cap > 0 && doesPieceMatchFilter(piece.pieceId, filter, piece.side)) {
           return acc > 0 ? Math.min(acc, cap) : cap;
         }
         return acc;
@@ -447,27 +470,28 @@ function getPseudoMovesForPiece(
     if (
       absDr > 0 &&
       absDr === absDc &&
-      rules.forbidDiagonalPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f))
+      rules.forbidDiagonalPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))
     ) {
       return false;
     }
     if (
       (drFromStart === 0 || dcFromStart === 0) &&
-      rules.forbidOrthogonalPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f))
+      rules.forbidOrthogonalPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))
     ) {
       return false;
     }
     const dot = drFromStart * fdr + dcFromStart * fdc;
     if (
       dot < 0 &&
-      isPieceBackwardForbidden(rules, piece.pieceId, from, to, state.board, customDef)
+      isPieceBackwardForbidden(rules, piece.pieceId, from, to, state.board, customDef, piece.side)
     ) {
       return false;
     }
     const { noSideways, strictlyForward } = isPieceSidewaysForbidden(
       rules,
       piece.pieceId,
-      customDef
+      customDef,
+      piece.side
     );
     if (strictlyForward && dot <= 0) return false;
     if (noSideways && dot === 0) return false;
@@ -476,25 +500,45 @@ function getPseudoMovesForPiece(
 
   const isEntryPermitted = (to: number): boolean => {
     if (ignoreVariantRules) return true;
-    return isSpecialEntryAllowed(rules, state.board, piece.pieceId, to);
+    if (!isSpecialEntryAllowed(rules, state.board, piece.pieceId, to, piece.side)) return false;
+    if (!isSquareColorAllowed(rules, piece.pieceId, to, cols, piece.side)) return false;
+    return true;
   };
 
   const isTargetSideCapturable = (targetSide: PlayerSide): boolean => {
-    if (targetSide !== piece.side) return true;
-    return !ignoreVariantRules && rules.allowFriendlyCapture;
+    const sameSide = targetSide === piece.side;
+    const allied = areSidesAllied(rules, piece.side, targetSide);
+    if (forDefenseCheck) return ignoreVariantRules ? sameSide : allied;
+    if (!allied) return true;
+    if (ignoreVariantRules) return false;
+    if (sameSide) return rules.allowFriendlyCapture;
+    return rules.allowTeammateCapture;
   };
 
-  const canCaptureVictim = (victimPieceId: string, victimSq: number): boolean => {
-    if (ignoreVariantRules) return true;
+  const canCaptureVictim = (
+    victimPieceId: string,
+    victimSq: number,
+    drFromStart: number,
+    dcFromStart: number
+  ): boolean => {
+    if (ignoreVariantRules || forDefenseCheck) return true;
     const victimPiece = state.pieces[victimSq];
     if (
       victimPiece &&
-      victimPiece.side === piece.side &&
-      rules.allowFriendlyCapture &&
+      areSidesAllied(rules, piece.side, victimPiece.side) &&
       isKingPiece(victimPieceId, state.customPieceMap)
     ) {
       return false;
     }
+    const dot = drFromStart * fdr + dcFromStart * fdc;
+    const isVictimDefended =
+      !forAttackCheck &&
+      rules.protectedByAllyUncapturable &&
+      victimPiece &&
+      !isKingPiece(victimPieceId, state.customPieceMap)
+        ? isSquareDefendedByAlly(state, victimSq, victimPiece.side)
+        : false;
+
     return canPieceCaptureTarget(
       rules,
       state.board,
@@ -503,34 +547,57 @@ function getPseudoMovesForPiece(
       victimPieceId,
       victimSq,
       allCustomPieces,
-      state.fullMoveNumber
+      state.fullMoveNumber,
+      {
+        attackerValue: getPieceValue(piece.pieceId, state.customPieceMap),
+        victimValue: getPieceValue(victimPieceId, state.customPieceMap),
+        isVictimDefended,
+        isBackwardMove: dot < 0,
+        attackerSide: piece.side,
+        victimSide: victimPiece?.side,
+      }
     ).allowed;
   };
 
+  const wrapCol = (rawCol: number): number | null => {
+    if (rawCol >= 0 && rawCol < cols) return rawCol;
+    if (!ignoreVariantRules && rules.wrapHorizontal) {
+      return ((rawCol % cols) + cols) % cols;
+    }
+    return null;
+  };
+
   const addSlide = (dr: number, dc: number, maxSteps: number, canJump = false) => {
-    const effectiveCanJump = canJump || globalCanJump;
-    const cappedSteps =
+    const effectiveCanJump = !jumpForbidden && (canJump || globalCanJump);
+    let cappedSteps =
       !ignoreVariantRules && pieceStepCap > 0
         ? Math.min(maxSteps, pieceStepCap)
         : maxSteps;
+    if (!ignoreVariantRules && rules.wrapHorizontal && dc !== 0) {
+      cappedSteps = Math.min(cappedSteps, Math.max(1, cols - 1));
+    }
 
     for (let step = 1; step <= cappedSteps; step++) {
       const nr = r0 + dr * step;
-      const nc = c0 + dc * step;
-      if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) break;
+      if (nr < 0 || nr >= rows) break;
+      const nc = wrapCol(c0 + dc * step);
+      if (nc === null) break;
       const to = nr * cols + nc;
+      if (to === from) break;
       if (state.board.cells[to] === 0 || state.board.blocked?.includes(to)) {
         if (!effectiveCanJump) break;
         continue;
       }
       const dirOk = isDirectionPermitted(dr * step, dc * step, to);
-      const entryOk = isEntryPermitted(to);
+      const specialOk = ignoreVariantRules || isSpecialEntryAllowed(rules, state.board, piece.pieceId, to, piece.side);
+      const colorOk = ignoreVariantRules || isSquareColorAllowed(rules, piece.pieceId, to, cols, piece.side);
+      const entryOk = specialOk && colorOk;
 
       const target = state.pieces[to];
       if (!target) {
         if (dirOk && entryOk) {
           moves.push({ from, to });
-        } else if (!entryOk && !effectiveCanJump) {
+        } else if (!specialOk && !effectiveCanJump) {
           break;
         }
       } else {
@@ -538,8 +605,8 @@ function getPseudoMovesForPiece(
           dirOk &&
           entryOk &&
           isTargetSideCapturable(target.side) &&
-          (forAttackCheck || target.invisibleTurns === 0) &&
-          canCaptureVictim(target.pieceId, to)
+          (forAttackCheck || forDefenseCheck || target.invisibleTurns === 0) &&
+          canCaptureVictim(target.pieceId, to, dr * step, dc * step)
         ) {
           moves.push({ from, to, captureIndex: to });
         }
@@ -557,9 +624,11 @@ function getPseudoMovesForPiece(
       return;
     }
     const nr = r0 + dr;
-    const nc = c0 + dc;
-    if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) return;
+    if (nr < 0 || nr >= rows) return;
+    const nc = wrapCol(c0 + dc);
+    if (nc === null) return;
     const to = nr * cols + nc;
+    if (to === from) return;
     if (!isCellPlayable(state.board, to)) return;
     if (!isDirectionPermitted(dr, dc, to)) return;
     if (!isEntryPermitted(to)) return;
@@ -569,8 +638,8 @@ function getPseudoMovesForPiece(
       moves.push({ from, to });
     } else if (
       isTargetSideCapturable(target.side) &&
-      (forAttackCheck || target.invisibleTurns === 0) &&
-      canCaptureVictim(target.pieceId, to)
+      (forAttackCheck || forDefenseCheck || target.invisibleTurns === 0) &&
+      canCaptureVictim(target.pieceId, to, dr, dc)
     ) {
       moves.push({ from, to, captureIndex: to });
     }
@@ -582,6 +651,19 @@ function getPseudoMovesForPiece(
       ? undefined
       : (!ignoreVariantRules && rules.promoteToPieceId) || 'builtin:Q';
 
+  const emitKnightLeaps = () => {
+    [[2, 1], [2, -1], [-2, 1], [-2, -1], [1, 2], [1, -2], [-1, 2], [-1, -2]].forEach(([dr, dc]) => {
+      if (jumpForbidden) {
+        const legR = r0 + (Math.abs(dr) === 2 ? Math.sign(dr) : 0);
+        const legC = wrapCol(c0 + (Math.abs(dc) === 2 ? Math.sign(dc) : 0));
+        if (legR < 0 || legR >= rows || legC === null) return;
+        const legSq = legR * cols + legC;
+        if (!isCellPlayable(state.board, legSq) || state.pieces[legSq]) return;
+      }
+      addJump(dr, dc);
+    });
+  };
+
   const emitTemplateMoves = (templateId: string, allowCastle: boolean) => {
     if (templateId === 'builtin:R') {
       [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dr, dc]) => addSlide(dr, dc, maxDim));
@@ -592,9 +674,7 @@ function getPseudoMovesForPiece(
         addSlide(dr, dc, maxDim)
       );
     } else if (templateId === 'builtin:N') {
-      [[2, 1], [2, -1], [-2, 1], [-2, -1], [1, 2], [1, -2], [-1, 2], [-1, -2]].forEach(([dr, dc]) =>
-        addJump(dr, dc)
-      );
+      emitKnightLeaps();
     } else if (templateId === 'builtin:K') {
       [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([dr, dc]) =>
         addJump(dr, dc)
@@ -614,159 +694,241 @@ function getPseudoMovesForPiece(
               [1, fdc],
             ];
 
-      if (!forAttackCheck) {
-        const r1 = r0 + fdr;
-        const c1 = c0 + fdc;
-        if (r1 >= 0 && r1 < rows && c1 >= 0 && c1 < cols) {
-          const to1 = r1 * cols + c1;
-          if (isCellPlayable(state.board, to1)) {
-            const target1 = state.pieces[to1];
+      const isBerolina = !ignoreVariantRules && rules.berolinaPawns;
+      const pawnCanMoveBackward =
+        !ignoreVariantRules &&
+        (rules.allowPawnBackward || (rules.allowPawnBackwardSides || []).includes(piece.side));
+
+      if (isBerolina) {
+        // Berolina pawn: steps diagonally forward (or backward if allowPawnBackward), captures straight forward
+        const activeMoveDiags: [number, number][] =
+          pawnCanMoveBackward
+            ? [
+                ...diagOffsets,
+                ...(fdr !== 0
+                  ? ([[-fdr, -1], [-fdr, 1]] as [number, number][])
+                  : ([[-1, -fdc], [1, -fdc]] as [number, number][])),
+              ]
+            : diagOffsets;
+
+        if (!forAttackCheck) {
+          for (const [dr, dc] of activeMoveDiags) {
+            const r1 = r0 + dr;
+            if (r1 < 0 || r1 >= rows) continue;
+            const c1 = wrapCol(c0 + dc);
+            if (c1 === null) continue;
+            const to1 = r1 * cols + c1;
             const isPromo =
               (fdr === -1 && r1 === 0) ||
               (fdr === 1 && r1 === rows - 1) ||
               (fdc === 1 && c1 === cols - 1) ||
               (fdc === -1 && c1 === 0);
-            if (!target1 && isDirectionPermitted(fdr, fdc, to1) && isEntryPermitted(to1)) {
-              moves.push({
-                from,
-                to: to1,
-                promotionPieceId: isPromo ? promoId : undefined,
-              });
-              if (
-                !piece.hasMoved &&
-                (ignoreVariantRules || (!rules.disablePawnDoubleStep && pieceStepCap !== 1))
-              ) {
-                const r2 = r0 + fdr * 2;
-                const c2 = c0 + fdc * 2;
-                if (r2 >= 0 && r2 < rows && c2 >= 0 && c2 < cols) {
-                  const to2 = r2 * cols + c2;
-                  if (
-                    isCellPlayable(state.board, to2) &&
-                    !state.pieces[to2] &&
-                    isDirectionPermitted(fdr * 2, fdc * 2, to2) &&
-                    isEntryPermitted(to2)
-                  ) {
-                    moves.push({ from, to: to2 });
-                  }
+            if (
+              isCellPlayable(state.board, to1) &&
+              !state.pieces[to1] &&
+              isDirectionPermitted(dr, dc, to1) &&
+              isEntryPermitted(to1)
+            ) {
+              moves.push({ from, to: to1, promotionPieceId: isPromo ? promoId : undefined });
+            }
+          }
+        }
+        const capR = r0 + fdr;
+        const capC = wrapCol(c0 + fdc);
+        if (capR >= 0 && capR < rows && capC !== null) {
+          const to = capR * cols + capC;
+          const target = state.pieces[to];
+          const isPromo =
+            (fdr === -1 && capR === 0) ||
+            (fdr === 1 && capR === rows - 1) ||
+            (fdc === 1 && capC === cols - 1) ||
+            (fdc === -1 && capC === 0);
+          if (isCellPlayable(state.board, to) && isDirectionPermitted(fdr, fdc, to) && isEntryPermitted(to)) {
+            if (forAttackCheck || forDefenseCheck) {
+              if (!target || canCaptureVictim(target.pieceId, to, fdr, fdc)) {
+                if (!rules.noCapturePieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))) {
+                  moves.push({ from, to, captureIndex: to });
                 }
               }
             } else if (
-              !ignoreVariantRules &&
-              rules.pawnCaptureForward &&
-              target1 &&
-              isTargetSideCapturable(target1.side) &&
-              target1.invisibleTurns === 0 &&
-              isDirectionPermitted(fdr, fdc, to1) &&
-              isEntryPermitted(to1) &&
-              canCaptureVictim(target1.pieceId, to1)
+              target &&
+              isTargetSideCapturable(target.side) &&
+              target.invisibleTurns === 0 &&
+              canCaptureVictim(target.pieceId, to, fdr, fdc)
             ) {
               moves.push({
                 from,
-                to: to1,
-                captureIndex: to1,
+                to,
+                captureIndex: to,
                 promotionPieceId: isPromo ? promoId : undefined,
               });
             }
           }
         }
+      } else {
+        if (!forAttackCheck && !forDefenseCheck) {
+          const r1 = r0 + fdr;
+          const c1 = wrapCol(c0 + fdc);
+          if (r1 >= 0 && r1 < rows && c1 !== null) {
+            const to1 = r1 * cols + c1;
+            if (isCellPlayable(state.board, to1)) {
+              const target1 = state.pieces[to1];
+              const isPromo =
+                (fdr === -1 && r1 === 0) ||
+                (fdr === 1 && r1 === rows - 1) ||
+                (fdc === 1 && c1 === cols - 1) ||
+                (fdc === -1 && c1 === 0);
+              if (!target1 && isDirectionPermitted(fdr, fdc, to1) && isEntryPermitted(to1)) {
+                moves.push({
+                  from,
+                  to: to1,
+                  promotionPieceId: isPromo ? promoId : undefined,
+                });
+                const maxInitial =
+                  ignoreVariantRules
+                    ? 2
+                    : rules.disablePawnDoubleStep || pieceStepCap === 1
+                      ? 1
+                      : rules.alwaysPawnDoubleStep
+                        ? Math.max(2, rules.pawnInitialSteps)
+                        : !piece.hasMoved
+                          ? Math.max(2, rules.pawnInitialSteps)
+                          : 1;
+                const effectiveMax = pieceStepCap > 0 ? Math.min(maxInitial, pieceStepCap) : maxInitial;
+                for (let step = 2; step <= effectiveMax; step++) {
+                  const rN = r0 + fdr * step;
+                  const cN = wrapCol(c0 + fdc * step);
+                  if (rN < 0 || rN >= rows || cN === null) break;
+                  const toN = rN * cols + cN;
+                  if (
+                    isCellPlayable(state.board, toN) &&
+                    !state.pieces[toN] &&
+                    isDirectionPermitted(fdr * step, fdc * step, toN) &&
+                    isEntryPermitted(toN)
+                  ) {
+                    moves.push({ from, to: toN });
+                  } else {
+                    break;
+                  }
+                }
+              } else if (
+                !ignoreVariantRules &&
+                rules.pawnCaptureForward &&
+                target1 &&
+                isTargetSideCapturable(target1.side) &&
+                target1.invisibleTurns === 0 &&
+                isDirectionPermitted(fdr, fdc, to1) &&
+                isEntryPermitted(to1) &&
+                canCaptureVictim(target1.pieceId, to1, fdr, fdc)
+              ) {
+                moves.push({
+                  from,
+                  to: to1,
+                  captureIndex: to1,
+                  promotionPieceId: isPromo ? promoId : undefined,
+                });
+              }
+            }
+          }
 
-        // Backward pawn step when explicitly permitted ("les pions peuvent reculer")
-        if (!ignoreVariantRules && rules.allowPawnBackward) {
-          const rb = r0 - fdr;
-          const cb = c0 - fdc;
-          if (rb >= 0 && rb < rows && cb >= 0 && cb < cols) {
-            const tob = rb * cols + cb;
+          // Backward pawn step when explicitly permitted ("les pions peuvent reculer")
+          if (pawnCanMoveBackward) {
+            const rb = r0 - fdr;
+            const cb = wrapCol(c0 - fdc);
+            if (rb >= 0 && rb < rows && cb !== null) {
+              const tob = rb * cols + cb;
+              if (
+                isCellPlayable(state.board, tob) &&
+                !state.pieces[tob] &&
+                isDirectionPermitted(-fdr, -fdc, tob) &&
+                isEntryPermitted(tob)
+              ) {
+                moves.push({ from, to: tob });
+              }
+            }
+          }
+        } else if (!ignoreVariantRules && rules.pawnCaptureForward) {
+          const r1 = r0 + fdr;
+          const c1 = wrapCol(c0 + fdc);
+          if (r1 >= 0 && r1 < rows && c1 !== null) {
+            const to1 = r1 * cols + c1;
+            const t1 = state.pieces[to1];
             if (
-              isCellPlayable(state.board, tob) &&
-              !state.pieces[tob] &&
-              isDirectionPermitted(-fdr, -fdc, tob) &&
-              isEntryPermitted(tob)
+              isCellPlayable(state.board, to1) &&
+              isDirectionPermitted(fdr, fdc, to1) &&
+              isEntryPermitted(to1) &&
+              (!t1 || canCaptureVictim(t1.pieceId, to1, fdr, fdc))
             ) {
-              moves.push({ from, to: tob });
+              moves.push({ from, to: to1, captureIndex: to1 });
             }
           }
         }
-      } else if (!ignoreVariantRules && rules.pawnCaptureForward) {
-        const r1 = r0 + fdr;
-        const c1 = c0 + fdc;
-        if (r1 >= 0 && r1 < rows && c1 >= 0 && c1 < cols) {
-          const to1 = r1 * cols + c1;
-          const t1 = state.pieces[to1];
-          if (
-            isCellPlayable(state.board, to1) &&
-            isDirectionPermitted(fdr, fdc, to1) &&
-            isEntryPermitted(to1) &&
-            (!t1 || canCaptureVictim(t1.pieceId, to1))
+
+        const activeDiagOffsets: [number, number][] =
+          pawnCanMoveBackward
+            ? [
+                ...diagOffsets,
+                ...(fdr !== 0
+                  ? ([
+                      [-fdr, -1],
+                      [-fdr, 1],
+                    ] as [number, number][])
+                  : ([
+                      [-1, -fdc],
+                      [1, -fdc],
+                    ] as [number, number][])),
+              ]
+            : diagOffsets;
+
+        for (const [dr, dc] of activeDiagOffsets) {
+          const nr = r0 + dr;
+          const nc = wrapCol(c0 + dc);
+          if (nr < 0 || nr >= rows || nc === null) continue;
+          const to = nr * cols + nc;
+          if (!isCellPlayable(state.board, to)) continue;
+          if (!isDirectionPermitted(dr, dc, to)) continue;
+          if (!isEntryPermitted(to)) continue;
+
+          const target = state.pieces[to];
+          const isPromo =
+            (fdr === -1 && nr === 0) ||
+            (fdr === 1 && nr === rows - 1) ||
+            (fdc === 1 && nc === cols - 1) ||
+            (fdc === -1 && nc === 0);
+
+          if (forAttackCheck || forDefenseCheck) {
+            if (!target || (isTargetSideCapturable(target.side) && canCaptureVictim(target.pieceId, to, dr, dc))) {
+              if (!rules.noCapturePieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))) {
+                moves.push({ from, to, captureIndex: to });
+              }
+            }
+          } else if (
+            target &&
+            isTargetSideCapturable(target.side) &&
+            target.invisibleTurns === 0 &&
+            canCaptureVictim(target.pieceId, to, dr, dc)
           ) {
-            moves.push({ from, to: to1, captureIndex: to1 });
+            moves.push({
+              from,
+              to,
+              captureIndex: to,
+              promotionPieceId: isPromo ? promoId : undefined,
+            });
+          } else if (
+            (ignoreVariantRules || !rules.disableEnPassant) &&
+            state.enPassantTarget === to &&
+            state.enPassantVictim !== null &&
+            state.pieces[state.enPassantVictim] &&
+            isTargetSideCapturable(state.pieces[state.enPassantVictim].side) &&
+            canCaptureVictim(state.pieces[state.enPassantVictim].pieceId, state.enPassantVictim, dr, dc)
+          ) {
+            moves.push({
+              from,
+              to,
+              captureIndex: state.enPassantVictim,
+              isEnPassant: true,
+            });
           }
-        }
-      }
-
-      const activeDiagOffsets: [number, number][] =
-        !ignoreVariantRules && rules.allowPawnBackward
-          ? [
-              ...diagOffsets,
-              ...(fdr !== 0
-                ? ([
-                    [-fdr, -1],
-                    [-fdr, 1],
-                  ] as [number, number][])
-                : ([
-                    [-1, -fdc],
-                    [1, -fdc],
-                  ] as [number, number][])),
-            ]
-          : diagOffsets;
-
-      for (const [dr, dc] of activeDiagOffsets) {
-        const nr = r0 + dr;
-        const nc = c0 + dc;
-        if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
-        const to = nr * cols + nc;
-        if (!isCellPlayable(state.board, to)) continue;
-        if (!isDirectionPermitted(dr, dc, to)) continue;
-        if (!isEntryPermitted(to)) continue;
-
-        const target = state.pieces[to];
-        const isPromo =
-          (fdr === -1 && nr === 0) ||
-          (fdr === 1 && nr === rows - 1) ||
-          (fdc === 1 && nc === cols - 1) ||
-          (fdc === -1 && nc === 0);
-
-        if (forAttackCheck) {
-          if (!target || canCaptureVictim(target.pieceId, to)) {
-            if (!rules.noCapturePieces.some((f) => doesPieceMatchFilter(piece.pieceId, f))) {
-              moves.push({ from, to, captureIndex: to });
-            }
-          }
-        } else if (
-          target &&
-          isTargetSideCapturable(target.side) &&
-          target.invisibleTurns === 0 &&
-          canCaptureVictim(target.pieceId, to)
-        ) {
-          moves.push({
-            from,
-            to,
-            captureIndex: to,
-            promotionPieceId: isPromo ? promoId : undefined,
-          });
-        } else if (
-          (ignoreVariantRules || !rules.disableEnPassant) &&
-          state.enPassantTarget === to &&
-          state.enPassantVictim !== null &&
-          state.pieces[state.enPassantVictim] &&
-          isTargetSideCapturable(state.pieces[state.enPassantVictim].side) &&
-          canCaptureVictim(state.pieces[state.enPassantVictim].pieceId, state.enPassantVictim)
-        ) {
-          moves.push({
-            from,
-            to,
-            captureIndex: state.enPassantVictim,
-            isEnPassant: true,
-          });
         }
       }
     } else if (state.customPieceMap[templateId]) {
@@ -804,7 +966,17 @@ function getPseudoMovesForPiece(
     }
   };
 
-  if (piece.pieceId === 'builtin:R') {
+  const matchingReplacements: string[] = !ignoreVariantRules
+    ? Object.entries(rules.replacePieceMoves || {})
+        .filter(([filter]) => doesPieceMatchFilter(piece.pieceId, filter, piece.side))
+        .flatMap(([, ids]) => ids)
+    : [];
+
+  if (matchingReplacements.length > 0) {
+    for (const tmplId of matchingReplacements) {
+      emitTemplateMoves(tmplId, false);
+    }
+  } else if (piece.pieceId === 'builtin:R') {
     emitTemplateMoves('builtin:R', false);
   } else if (piece.pieceId === 'builtin:B') {
     emitTemplateMoves('builtin:B', false);
@@ -817,6 +989,7 @@ function getPseudoMovesForPiece(
     // Castling on standard-compatible row (unless disabled by variant rules)
     if (
       !forAttackCheck &&
+      !forDefenseCheck &&
       (ignoreVariantRules || !rules.disableCastling) &&
       !piece.hasMoved &&
       rows >= 8 &&
@@ -883,7 +1056,7 @@ function getPseudoMovesForPiece(
     if (def) {
       const parsed = parsePieceTextConfig(def);
       const maxRange = def.moves.maxRange > 0 ? def.moves.maxRange : parsed.extraRange || maxDim;
-      const canJump = Boolean(def.moves.canJump || parsed.canJump);
+      const canJump = !jumpForbidden && Boolean(def.moves.canJump || parsed.canJump);
 
       if (def.moves.rook) {
         [[1, 0], [-1, 0], [0, 1], [0, -1]].forEach(([dr, dc]) => addSlide(dr, dc, maxRange, canJump));
@@ -892,9 +1065,7 @@ function getPseudoMovesForPiece(
         [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([dr, dc]) => addSlide(dr, dc, maxRange, canJump));
       }
       if (def.moves.knight) {
-        [[2, 1], [2, -1], [-2, 1], [-2, -1], [1, 2], [1, -2], [-1, 2], [-1, -2]].forEach(([dr, dc]) =>
-          addJump(dr, dc)
-        );
+        emitKnightLeaps();
       }
       if (def.moves.king) {
         [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([dr, dc]) =>
@@ -906,11 +1077,11 @@ function getPseudoMovesForPiece(
       }
       if (parsed.berolina) {
         const diags: [number, number][] = fdr !== 0 ? [[fdr, -1], [fdr, 1]] : [[-1, fdc], [1, fdc]];
-        if (!forAttackCheck) {
+        if (!forAttackCheck && !forDefenseCheck) {
           for (const [dr, dc] of diags) {
             const nr = r0 + dr;
-            const nc = c0 + dc;
-            if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+            const nc = wrapCol(c0 + dc);
+            if (nr >= 0 && nr < rows && nc !== null) {
               const to = nr * cols + nc;
               if (
                 isCellPlayable(state.board, to) &&
@@ -924,8 +1095,8 @@ function getPseudoMovesForPiece(
           }
         }
         const capR = r0 + fdr;
-        const capC = c0 + fdc;
-        if (capR >= 0 && capR < rows && capC >= 0 && capC < cols) {
+        const capC = wrapCol(c0 + fdc);
+        if (capR >= 0 && capR < rows && capC !== null) {
           const to = capR * cols + capC;
           const target = state.pieces[to];
           if (
@@ -934,8 +1105,8 @@ function getPseudoMovesForPiece(
             isEntryPermitted(to) &&
             target &&
             isTargetSideCapturable(target.side) &&
-            (forAttackCheck || target.invisibleTurns === 0) &&
-            canCaptureVictim(target.pieceId, to)
+            (forAttackCheck || forDefenseCheck || target.invisibleTurns === 0) &&
+            canCaptureVictim(target.pieceId, to, fdr, fdc)
           ) {
             moves.push({ from, to, captureIndex: to });
           }
@@ -977,10 +1148,21 @@ function getPseudoMovesForPiece(
   // Mimicry / bonus piece movements granted by variant text rules
   if (!ignoreVariantRules) {
     for (const [filter, grantedIds] of Object.entries(rules.grantPieceMoves || {})) {
-      if (doesPieceMatchFilter(piece.pieceId, filter)) {
+      if (doesPieceMatchFilter(piece.pieceId, filter, piece.side)) {
         for (const tmplId of grantedIds) {
           if (tmplId !== piece.pieceId) {
             emitTemplateMoves(tmplId, false);
+          }
+        }
+      }
+    }
+    if (state.board.special?.includes(from)) {
+      for (const [filter, grantedIds] of Object.entries(rules.specialGrantPieceMoves || {})) {
+        if (doesPieceMatchFilter(piece.pieceId, filter, piece.side)) {
+          for (const tmplId of grantedIds) {
+            if (tmplId !== piece.pieceId) {
+              emitTemplateMoves(tmplId, false);
+            }
           }
         }
       }
@@ -1027,7 +1209,7 @@ export function getSpecialPowerMoves(state: GameState, from: number): LegalMove[
         i !== from &&
         isCellPlayable(state.board, i) &&
         !state.pieces[i] &&
-        isSpecialEntryAllowed(rules, state.board, piece.pieceId, i)
+        isSpecialEntryAllowed(rules, state.board, piece.pieceId, i, piece.side)
       ) {
         moves.push({ from, to: i, isPower: 'teleport', description: 'Téléportation' });
       }
@@ -1057,7 +1239,7 @@ export function getSpecialPowerMoves(state: GameState, from: number): LegalMove[
         if (
           isCellPlayable(state.board, to) &&
           !state.pieces[to] &&
-          isSpecialEntryAllowed(rules, state.board, piece.pieceId, to)
+          isSpecialEntryAllowed(rules, state.board, piece.pieceId, to, piece.side)
         ) {
           moves.push({ from, to, isPower: 'duplicate', description: 'Duplication' });
         }
@@ -1100,9 +1282,33 @@ export function isSquareAttackedByEnemy(
   square: number,
   defenderSide: PlayerSide
 ): boolean {
+  const rules = getStateRules(state);
   for (const [idxStr, p] of Object.entries(state.pieces)) {
-    if (p.side === defenderSide || state.eliminatedSides.includes(p.side)) continue;
+    if (areSidesAllied(rules, p.side, defenderSide) || state.eliminatedSides.includes(p.side)) {
+      continue;
+    }
     const moves = getPseudoMovesForPiece(state, Number(idxStr), true);
+    if (moves.some((m) => m.to === square)) return true;
+  }
+  return false;
+}
+
+function isSquareDefendedByAlly(
+  state: GameState,
+  square: number,
+  allySide: PlayerSide
+): boolean {
+  const rules = getStateRules(state);
+  for (const [idxStr, p] of Object.entries(state.pieces)) {
+    const sq = Number(idxStr);
+    if (
+      sq === square ||
+      !areSidesAllied(rules, p.side, allySide) ||
+      state.eliminatedSides.includes(p.side)
+    ) {
+      continue;
+    }
+    const moves = getPseudoMovesForPiece(state, sq, true, false, true);
     if (moves.some((m) => m.to === square)) return true;
   }
   return false;
@@ -1231,6 +1437,10 @@ export function explainBlockedMove(
   const customDef = state.customPieceMap[piece.pieceId];
   const allCustomPieces = Object.values(state.customPieceMap || {});
 
+  if (rules.immobilePieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))) {
+    return 'Règle de la variante : cette pièce est immobile et ne peut pas se déplacer.';
+  }
+
   // Check if the piece could move there if variant rules were ignored
   const unrestrictedMoves = getPseudoMovesForPiece(state, from, false, true);
   const candidate = unrestrictedMoves.find((m) => m.to === to);
@@ -1257,19 +1467,19 @@ export function explainBlockedMove(
   if (
     Math.abs(dr) > 0 &&
     Math.abs(dr) === Math.abs(dc) &&
-    rules.forbidDiagonalPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f))
+    rules.forbidDiagonalPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))
   ) {
     return 'Règle de la variante : déplacement en diagonale interdit pour cette pièce.';
   }
   if (
     (dr === 0 || dc === 0) &&
-    rules.forbidOrthogonalPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f))
+    rules.forbidOrthogonalPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))
   ) {
     return 'Règle de la variante : déplacement en ligne droite interdit pour cette pièce.';
   }
 
   const pieceCap = Object.entries(rules.pieceMaxSteps).reduce((acc, [filter, cap]) => {
-    if (cap > 0 && doesPieceMatchFilter(piece.pieceId, filter)) {
+    if (cap > 0 && doesPieceMatchFilter(piece.pieceId, filter, piece.side)) {
       return acc > 0 ? Math.min(acc, cap) : cap;
     }
     return acc;
@@ -1280,7 +1490,7 @@ export function explainBlockedMove(
 
   if (
     dot < 0 &&
-    isPieceBackwardForbidden(rules, piece.pieceId, from, to, state.board, customDef)
+    isPieceBackwardForbidden(rules, piece.pieceId, from, to, state.board, customDef, piece.side)
   ) {
     return 'Règle de la variante : cette pièce ne peut pas reculer.';
   }
@@ -1288,19 +1498,46 @@ export function explainBlockedMove(
   const { noSideways, strictlyForward } = isPieceSidewaysForbidden(
     rules,
     piece.pieceId,
-    customDef
+    customDef,
+    piece.side
   );
   if ((strictlyForward || noSideways) && dot === 0) {
     return 'Règle de la variante : déplacement latéral interdit pour cette pièce.';
   }
 
-  if (!isSpecialEntryAllowed(rules, state.board, piece.pieceId, to)) {
+  if (!isSpecialEntryAllowed(rules, state.board, piece.pieceId, to, piece.side)) {
     return 'Règle de la variante : cette pièce n’a pas le droit d’entrer sur cette case spéciale ✦.';
+  }
+
+  if (!isSquareColorAllowed(rules, piece.pieceId, to, cols, piece.side)) {
+    return 'Règle de la variante : cette pièce ne peut pas aller sur une case de cette couleur.';
+  }
+
+  if (
+    rules.forbidJumpPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side)) &&
+    ((Math.abs(dr) === 2 && Math.abs(dc) === 1) || (Math.abs(dr) === 1 && Math.abs(dc) === 2))
+  ) {
+    const legR = r0 + (Math.abs(dr) === 2 ? Math.sign(dr) : 0);
+    const legC = c0 + (Math.abs(dc) === 2 ? Math.sign(dc) : 0);
+    const legSq = legR * cols + legC;
+    if (state.pieces[legSq]) {
+      return 'Règle de la variante : cette pièce n’a pas le droit de sauter par-dessus une autre pièce.';
+    }
   }
 
   const victimSq = candidate.captureIndex ?? to;
   const victim = state.pieces[victimSq];
-  if (victim && (victim.side !== piece.side || rules.allowFriendlyCapture)) {
+  const victimIsAllied = victim ? areSidesAllied(rules, piece.side, victim.side) : false;
+  if (
+    victim &&
+    (!victimIsAllied ||
+      (victim.side === piece.side ? rules.allowFriendlyCapture : rules.allowTeammateCapture))
+  ) {
+    const isVictimDefended =
+      rules.protectedByAllyUncapturable &&
+      !isKingPiece(victim.pieceId, state.customPieceMap) &&
+      isSquareDefendedByAlly(state, victimSq, victim.side);
+
     const capCheck = canPieceCaptureTarget(
       rules,
       state.board,
@@ -1309,7 +1546,15 @@ export function explainBlockedMove(
       victim.pieceId,
       victimSq,
       allCustomPieces,
-      state.fullMoveNumber
+      state.fullMoveNumber,
+      {
+        attackerValue: getPieceValue(piece.pieceId, state.customPieceMap),
+        victimValue: getPieceValue(victim.pieceId, state.customPieceMap),
+        isVictimDefended,
+        isBackwardMove: dot < 0,
+        attackerSide: piece.side,
+        victimSide: victim.side,
+      }
     );
     if (!capCheck.allowed && capCheck.reason) {
       return `Règle de la variante : ${capCheck.reason}`;
@@ -1375,8 +1620,11 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
   // Handle Shield absorption on capture
   const victimIdx = move.captureIndex ?? move.to;
   const victim = state.pieces[victimIdx];
+  const victimIsAllied = victim ? areSidesAllied(rules, moving.side, victim.side) : false;
   const isCaptureTarget = Boolean(
-    victim && (victim.side !== moving.side || rules.allowFriendlyCapture)
+    victim &&
+      (!victimIsAllied ||
+        (victim.side === moving.side ? rules.allowFriendlyCapture : rules.allowTeammateCapture))
   );
   if (victim && isCaptureTarget && victim.shielded) {
     // Shield absorbs the attack!
@@ -1414,14 +1662,34 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
   delete state.pieces[move.from];
   moving.hasMoved = true;
 
+  if (capturedSuccessful && (rules.kamikazeOnCapture || rules.atomicCapture)) {
+    if (rules.atomicCapture) {
+      const { rows, cols } = state.board;
+      const vr = Math.floor(victimIdx / cols);
+      const vc = victimIdx % cols;
+      for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+        const nr = vr + dr;
+        const nc = vc + dc;
+        if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+          const adjSq = nr * cols + nc;
+          const adjP = state.pieces[adjSq];
+          if (adjP && adjP.pieceId !== 'builtin:P') {
+            delete state.pieces[adjSq];
+          }
+        }
+      }
+    }
+    return state;
+  }
+
   if (move.promotionPieceId) {
     moving.pieceId = move.promotionPieceId;
   } else if (
     capturedSuccessful &&
-    rules.promoteOnCapturePieces.some((f) => doesPieceMatchFilter(moving.pieceId, f)) &&
+    rules.promoteOnCapturePieces.some((f) => doesPieceMatchFilter(moving.pieceId, f, moving.side)) &&
     !isKingPiece(moving.pieceId, state.customPieceMap)
   ) {
-    moving.pieceId = 'builtin:Q';
+    moving.pieceId = rules.promoteOnCaptureTarget || 'builtin:Q';
   }
 
   // Castling rook move
@@ -1455,7 +1723,7 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
         finalIndex = others[0];
       }
     } else if (eff === 'promote' && !isKingPiece(moving.pieceId, state.customPieceMap)) {
-      moving.pieceId = 'builtin:Q';
+      moving.pieceId = rules.specialPromoteTarget || 'builtin:Q';
     } else if (eff === 'shield') {
       moving.shielded = true;
     } else if (eff === 'freeze') {
@@ -1497,12 +1765,16 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
 
   // Bonus action after capture ("après une capture, on rejoue")
   const victimBefore = move.captureIndex !== undefined ? prevState.pieces[move.captureIndex] : undefined;
+  const victimWasAllied = victimBefore
+    ? areSidesAllied(rules, currentSide, victimBefore.side)
+    : false;
   if (
     !move.isPower &&
     rules.extraActionOnCapture &&
     victimBefore &&
     !victimBefore.shielded &&
-    (victimBefore.side !== currentSide || rules.allowFriendlyCapture)
+    (!victimWasAllied ||
+      (victimBefore.side === currentSide ? rules.allowFriendlyCapture : rules.allowTeammateCapture))
   ) {
     state.actionsRemaining += 1;
   }
@@ -1522,20 +1794,31 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
   state.moveHistory.push(label);
   state.lastMove = { from: move.from, to: move.to, description: label };
 
+  const setWinnerForSide = (winSide: PlayerSide, soloReason: string, teamReasonPrefix: string) => {
+    const team = getTeamSides(rules, winSide).filter((m) => state.activeSides.includes(m));
+    state.winner = winSide;
+    state.winningTeam = team.length > 1 ? team : null;
+    state.endReason = team.length > 1 ? `L’équipe ${formatTeamLabel(team)} ${teamReasonPrefix}` : soloReason;
+    state.inCheckSides = [];
+  };
+
   // Reverse win (Antichess / Qui-perd-gagne)
   if (rules.reverseWin) {
     for (const s of state.activeSides) {
       const sidePieces = Object.values(state.pieces).filter((p) => p.side === s);
       if (sidePieces.length === 0) {
-        state.winner = s;
-        state.endReason = `${SIDE_LABELS[s]} n’ont plus aucune pièce et remportent la partie (Qui-perd-gagne) !`;
-        state.inCheckSides = [];
+        setWinnerForSide(
+          s,
+          `${SIDE_LABELS[s]} n’ont plus aucune pièce et remportent la partie (Qui-perd-gagne) !`,
+          'remporte la partie (Qui-perd-gagne) !'
+        );
         return state;
       }
     }
   }
 
   // Check if any side lost all pieces or lost their king
+  const newlyEliminated: PlayerSide[] = [];
   for (const s of state.activeSides) {
     if (state.eliminatedSides.includes(s)) continue;
     const sidePieces = Object.values(state.pieces).filter((p) => p.side === s);
@@ -1543,15 +1826,41 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
     const startedWithKing = Object.values(prevState.pieces).some(
       (p) => p.side === s && isKingPiece(p.pieceId, state.customPieceMap)
     );
-    if (sidePieces.length === 0 || (startedWithKing && !hasKing && !rules.reverseWin && state.variant.victoryType !== 'eliminate_all')) {
-      state.eliminatedSides.push(s);
+    if (
+      sidePieces.length === 0 ||
+      (startedWithKing && !hasKing && !rules.reverseWin && state.variant.victoryType !== 'eliminate_all')
+    ) {
+      newlyEliminated.push(s);
+    }
+  }
+  for (const s of newlyEliminated) {
+    if (!state.eliminatedSides.includes(s)) state.eliminatedSides.push(s);
+    if (rules.teamSharedElimination) {
+      for (const ally of getTeamSides(rules, s)) {
+        if (state.activeSides.includes(ally) && !state.eliminatedSides.includes(ally)) {
+          state.eliminatedSides.push(ally);
+        }
+      }
     }
   }
 
-  const remainingSides = state.activeSides.filter((s) => !state.eliminatedSides.includes(s));
-  if (remainingSides.length === 1) {
-    state.winner = remainingSides[0];
-    state.endReason = `${SIDE_LABELS[remainingSides[0]]} remportent la partie !`;
+  const remainingGroups = getRemainingTeamGroups(rules, state.activeSides, state.eliminatedSides);
+  if (remainingGroups.length === 0) {
+    state.winner = 'draw';
+    state.winningTeam = null;
+    state.endReason = 'Tous les camps ont été éliminés simultanément (match nul).';
+    state.inCheckSides = [];
+    return state;
+  }
+  if (remainingGroups.length === 1) {
+    const winGroup = remainingGroups[0];
+    const leadSide = winGroup.includes(currentSide) ? currentSide : winGroup[0];
+    state.winner = leadSide;
+    state.winningTeam = winGroup.length > 1 ? winGroup : null;
+    state.endReason =
+      winGroup.length > 1
+        ? `L’équipe ${formatTeamLabel(winGroup)} remporte la partie !`
+        : `${SIDE_LABELS[leadSide]} remportent la partie !`;
     state.inCheckSides = [];
     return state;
   }
@@ -1564,8 +1873,11 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
     for (const sq of state.board.special || []) {
       const p = state.pieces[sq];
       if (p && isKingPiece(p.pieceId, state.customPieceMap)) {
-        state.winner = p.side;
-        state.endReason = `${SIDE_LABELS[p.side]} atteignent la case royale !`;
+        setWinnerForSide(
+          p.side,
+          `${SIDE_LABELS[p.side]} atteignent la case royale !`,
+          'atteint la case royale !'
+        );
         return state;
       }
     }
@@ -1575,9 +1887,12 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
   if (rules.specialWinPieces.length > 0 && (state.board.special?.length || 0) > 0) {
     for (const sq of state.board.special || []) {
       const p = state.pieces[sq];
-      if (p && rules.specialWinPieces.some((f) => doesPieceMatchFilter(p.pieceId, f))) {
-        state.winner = p.side;
-        state.endReason = `${SIDE_LABELS[p.side]} atteignent une case spéciale ✦ victorieuse !`;
+      if (p && rules.specialWinPieces.some((f) => doesPieceMatchFilter(p.pieceId, f, p.side))) {
+        setWinnerForSide(
+          p.side,
+          `${SIDE_LABELS[p.side]} atteignent une case spéciale ✦ victorieuse !`,
+          'atteint une case spéciale ✦ victorieuse !'
+        );
         return state;
       }
     }
@@ -1587,7 +1902,7 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
   if (rules.reachOppositeRankPieces.length > 0) {
     const { rows, cols } = state.board;
     for (const [idxStr, p] of Object.entries(state.pieces)) {
-      if (!rules.reachOppositeRankPieces.some((f) => doesPieceMatchFilter(p.pieceId, f))) continue;
+      if (!rules.reachOppositeRankPieces.some((f) => doesPieceMatchFilter(p.pieceId, f, p.side))) continue;
       const idx = Number(idxStr);
       const r = Math.floor(idx / cols);
       const c = idx % cols;
@@ -1598,8 +1913,11 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
         (fdc === 1 && c === cols - 1) ||
         (fdc === -1 && c === 0);
       if (reached) {
-        state.winner = p.side;
-        state.endReason = `${SIDE_LABELS[p.side]} atteignent la dernière rangée avec ${getPieceName(p.pieceId, state.customPieceMap)} !`;
+        setWinnerForSide(
+          p.side,
+          `${SIDE_LABELS[p.side]} atteignent la dernière rangée avec ${getPieceName(p.pieceId, state.customPieceMap)} !`,
+          `atteint la dernière rangée avec ${getPieceName(p.pieceId, state.customPieceMap)} !`
+        );
         return state;
       }
     }
@@ -1611,9 +1929,17 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
       rules.captureTargetOverride > 0
         ? rules.captureTargetOverride
         : Math.max(1, state.variant.captureTarget || 5);
-    if (state.capturesCount[currentSide] >= target) {
-      state.winner = currentSide;
-      state.endReason = `${SIDE_LABELS[currentSide]} atteignent ${target} captures !`;
+    const currentTeam = getTeamSides(rules, currentSide).filter((m) => state.activeSides.includes(m));
+    const teamCaptures =
+      currentTeam.length > 1
+        ? currentTeam.reduce((sum, m) => sum + (state.capturesCount[m] || 0), 0)
+        : state.capturesCount[currentSide] || 0;
+    if (teamCaptures >= target) {
+      setWinnerForSide(
+        currentSide,
+        `${SIDE_LABELS[currentSide]} atteignent ${target} captures !`,
+        `atteint ${target} captures !`
+      );
       return state;
     }
   }
@@ -1649,42 +1975,122 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
 
   // N-Checks victory (e.g. Trois échecs)
   if (rules.checksTarget > 0) {
-    const checkingEnemy = state.inCheckSides.some((s) => s !== currentSide);
+    const checkingEnemy = state.inCheckSides.some((s) => !areSidesAllied(rules, currentSide, s));
     if (checkingEnemy) {
       state.checksDelivered[currentSide] = (state.checksDelivered[currentSide] || 0) + 1;
-      if (state.checksDelivered[currentSide] >= rules.checksTarget) {
-        state.winner = currentSide;
-        state.endReason = `${SIDE_LABELS[currentSide]} remportent la partie avec ${rules.checksTarget} échecs !`;
+      const currentTeam = getTeamSides(rules, currentSide).filter((m) => state.activeSides.includes(m));
+      const teamChecks =
+        currentTeam.length > 1
+          ? currentTeam.reduce((sum, m) => sum + (state.checksDelivered[m] || 0), 0)
+          : state.checksDelivered[currentSide];
+      if (teamChecks >= rules.checksTarget) {
+        setWinnerForSide(
+          currentSide,
+          `${SIDE_LABELS[currentSide]} remportent la partie avec ${rules.checksTarget} échecs !`,
+          `remporte la partie avec ${rules.checksTarget} échecs !`
+        );
         return state;
       }
     }
   }
 
-  // Check checkmate / stalemate for next active player
+  // Check checkmate / stalemate for next active player (team-aware)
+  const advanceToNextAliveSide = () => {
+    let nxt = (state.turnIndex + 1) % state.activeSides.length;
+    let g = 0;
+    while (state.eliminatedSides.includes(state.activeSides[nxt]) && g < state.activeSides.length) {
+      nxt = (nxt + 1) % state.activeSides.length;
+      g++;
+    }
+    state.turnIndex = nxt;
+  };
+
   const nextSide = getCurrentTurnSide(state);
   const nextMoves = getAllLegalMovesForSide(state, nextSide, true);
   if (nextMoves.length === 0) {
     if (rules.reverseWin) {
-      state.winner = nextSide;
-      state.endReason = `Plus aucun coup légal pour les ${SIDE_LABELS[nextSide]} — victoire Qui-perd-gagne !`;
-    } else if (state.inCheckSides.includes(nextSide)) {
-      if (remainingSides.length <= 2) {
-        state.winner = currentSide;
-        state.endReason = `Échec et mat ! Victoire des ${SIDE_LABELS[currentSide]}.`;
-      } else {
+      setWinnerForSide(
+        nextSide,
+        `Plus aucun coup légal pour les ${SIDE_LABELS[nextSide]} — victoire Qui-perd-gagne !`,
+        'remporte la partie (Qui-perd-gagne) !'
+      );
+    } else if (state.inCheckSides.includes(nextSide) || rules.stalemateWins) {
+      const wasCheckmate = state.inCheckSides.includes(nextSide);
+      if (!state.eliminatedSides.includes(nextSide)) {
         state.eliminatedSides.push(nextSide);
-        const stillLeft = state.activeSides.filter((s) => !state.eliminatedSides.includes(s));
-        if (stillLeft.length === 1) {
-          state.winner = stillLeft[0];
-          state.endReason = `${SIDE_LABELS[stillLeft[0]]} remportent la partie !`;
+      }
+      if (rules.teamSharedElimination) {
+        for (const ally of getTeamSides(rules, nextSide)) {
+          if (state.activeSides.includes(ally) && !state.eliminatedSides.includes(ally)) {
+            state.eliminatedSides.push(ally);
+          }
         }
       }
+      const stillGroups = getRemainingTeamGroups(rules, state.activeSides, state.eliminatedSides);
+      if (stillGroups.length === 0) {
+        state.winner = 'draw';
+        state.winningTeam = null;
+        state.endReason = 'Match nul.';
+      } else if (stillGroups.length === 1) {
+        const winGroup = stillGroups[0];
+        const leadSide = winGroup.includes(currentSide) ? currentSide : winGroup[0];
+        state.winner = leadSide;
+        state.winningTeam = winGroup.length > 1 ? winGroup : null;
+        if (wasCheckmate) {
+          state.endReason =
+            winGroup.length > 1
+              ? `Échec et mat ! Victoire de l’équipe ${formatTeamLabel(winGroup)}.`
+              : `Échec et mat ! Victoire des ${SIDE_LABELS[leadSide]}.`;
+        } else {
+          state.endReason =
+            winGroup.length > 1
+              ? `Pat ! Victoire de l’équipe ${formatTeamLabel(winGroup)} (le pat fait gagner).`
+              : `Pat ! Victoire des ${SIDE_LABELS[leadSide]} (le pat fait gagner).`;
+        }
+        state.inCheckSides = [];
+      } else {
+        advanceToNextAliveSide();
+      }
     } else {
-      state.winner = 'draw';
-      state.endReason = 'Pat — Aucun coup légal disponible (match nul).';
+      // Stalemate: check if an alive teammate can still play
+      const aliveTeammates = getTeamSides(rules, nextSide).filter(
+        (m) => m !== nextSide && state.activeSides.includes(m) && !state.eliminatedSides.includes(m)
+      );
+      const allyWithMoves = aliveTeammates.find((ally) => {
+        const allyIdx = state.activeSides.indexOf(ally);
+        if (allyIdx < 0) return false;
+        const probeState = { ...state, turnIndex: allyIdx };
+        return getAllLegalMovesForSide(probeState, ally, true).length > 0;
+      });
+      if (allyWithMoves) {
+        advanceToNextAliveSide();
+      } else if (remainingGroups.length > 2) {
+        for (const m of getTeamSides(rules, nextSide)) {
+          if (state.activeSides.includes(m) && !state.eliminatedSides.includes(m)) {
+            state.eliminatedSides.push(m);
+          }
+        }
+        const stillGroups = getRemainingTeamGroups(rules, state.activeSides, state.eliminatedSides);
+        if (stillGroups.length === 1) {
+          const winGroup = stillGroups[0];
+          state.winner = winGroup[0];
+          state.winningTeam = winGroup.length > 1 ? winGroup : null;
+          state.endReason =
+            winGroup.length > 1
+              ? `L’équipe ${formatTeamLabel(winGroup)} remporte la partie !`
+              : `${SIDE_LABELS[winGroup[0]]} remportent la partie !`;
+        } else {
+          advanceToNextAliveSide();
+        }
+      } else {
+        state.winner = 'draw';
+        state.winningTeam = null;
+        state.endReason = 'Pat — Aucun coup légal disponible (match nul).';
+      }
     }
   } else if (state.halfMoveClock >= 100) {
     state.winner = 'draw';
+    state.winningTeam = null;
     state.endReason = 'Règle des 50 coups sans prise ni mouvement de pion (match nul).';
   }
 

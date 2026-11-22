@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="fr" class="dark">
+<html lang="fr" class="dark" style="background-color:#0d1118;">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
@@ -20,6 +20,16 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;700&family=Outfit:wght@500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <script>
+      try {
+        var raw = localStorage.getItem('chesslab_app_v2');
+        if (raw) {
+          var st = JSON.parse(raw);
+          if (st && st.settings && st.settings.theme === 'light') {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.style.backgroundColor = '#f8fafc';
+          }
+        }
+      } catch (e) {}
       window.__deferredPwaPrompt = null;
       window.addEventListener('beforeinstallprompt', function (e) {
         e.preventDefault();
@@ -31,7 +41,7 @@
       });
     </script>
   </head>
-  <body class="bg-[#0d1118] text-[#edf2fa] antialiased selection:bg-[#7ebcff]/30">
+  <body class="bg-[#0d1118] text-[#edf2fa] antialiased selection:bg-[#7ebcff]/30" style="background-color:#0d1118;">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

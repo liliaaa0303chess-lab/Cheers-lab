@@ -7,8 +7,17 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createServer as createViteServer } from 'vite';
 import { getStarterVariants } from './src/utils/defaultVariants.ts';
 import { computeControlledDifficulty } from './src/engine/eol.ts';
+import { compileVariantRules } from './src/engine/ruleParser.ts';
 import { isContentFamilyFriendly, validateFamilyFriendlyText } from './src/utils/moderation.ts';
-import type { Variant } from './src/types/chess.ts';
+import {
+  AI_LEVELS,
+  getClosestAiLevelForEol,
+  type AiDifficultyLevel,
+  type OnlineAiSeat,
+  type OnlineHumanSeat,
+  type PlayerSide,
+  type Variant,
+} from './src/types/chess.ts';
 
 const PORT = 3000;
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -85,12 +94,16 @@ function persistDb() {
 }
 
 // ---------- Real-time Matchmaking & Game Rooms ----------
+const RECONNECT_GRACE_MS = 5 * 60 * 1000;
+
 interface PlayerConn {
   ws: WebSocket;
   userId: string;
   nickname: string;
   eol: number;
-  side: 'white' | 'black';
+  side: PlayerSide;
+  disconnectedAt?: number | null;
+  eliminated?: boolean;
   theme?: {
     boardTexture?: string;
     boardLight?: string;
@@ -102,7 +115,16 @@ interface OnlineRoom {
   roomId: string;
   code: string;
   variant: Variant;
+  competitive: boolean;
+  targetPlayers: number;
+  hostUserId: string;
   players: PlayerConn[];
+  aiSeats: OnlineAiSeat[];
+  activeSides: PlayerSide[];
+  eliminatedSides: PlayerSide[];
+  turnSide: PlayerSide;
+  clocks: Record<PlayerSide, number>;
+  incrementSec: number;
   moves: unknown[];
   drawOfferFrom: string | null;
   status: 'waiting' | 'active' | 'finished';
@@ -116,6 +138,7 @@ interface QueueEntry {
   nickname: string;
   eol: number;
   mode: 'specific' | 'random';
+  competitive: boolean;
   variantId: string | null;
   variantSnapshot?: Variant;
   joinedAt: number;
@@ -124,6 +147,29 @@ interface QueueEntry {
     boardLight?: string;
     boardDark?: string;
   };
+}
+
+const VALID_SIDES: PlayerSide[] = ['white', 'black', 'red', 'blue', 'green', 'gold'];
+
+function getVariantActiveSides(variant: Variant): PlayerSide[] {
+  const compiled = compileVariantRules(variant, variant.customPieceDefs || []);
+  const requestedCount = Math.max(2, Math.min(6, variant.players || 2));
+  const sides = [...compiled.turnOrderSides].slice(0, requestedCount);
+  for (const raw of Object.values(variant.setup || {})) {
+    const match = String(raw).match(/\|(white|black|red|blue|green|gold)$/);
+    const s = match?.[1] as PlayerSide | undefined;
+    if (s && !sides.includes(s)) sides.push(s);
+  }
+  return sides;
+}
+
+function shuffleSides(sides: PlayerSide[]): PlayerSide[] {
+  const copy = [...sides];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
 }
 
 const rooms = new Map<string, OnlineRoom>();
@@ -145,10 +191,178 @@ function generateRoomCode(): string {
   return out;
 }
 
+function buildInitialClocks(variant: Variant): Record<PlayerSide, number> {
+  const secs = Math.max(0, (variant.duration || 0) * 60);
+  return {
+    white: secs,
+    black: secs,
+    red: secs,
+    blue: secs,
+    green: secs,
+    gold: secs,
+  };
+}
+
+function getDisconnectedSummary(room: OnlineRoom) {
+  const now = Date.now();
+  return room.players
+    .filter((p) => p.disconnectedAt && !p.eliminated)
+    .map((p) => ({
+      userId: p.userId,
+      nickname: p.nickname,
+      side: p.side,
+      remainingSec: Math.max(0, Math.ceil((RECONNECT_GRACE_MS - (now - (p.disconnectedAt || now))) / 1000)),
+    }));
+}
+
+function launchOnlineRoom(room: OnlineRoom, customAiLevels?: number[]) {
+  const activeSides = getVariantActiveSides(room.variant);
+  const shuffled = shuffleSides(activeSides);
+
+  room.players.forEach((p, idx) => {
+    p.side = shuffled[idx] || VALID_SIDES[idx] || 'white';
+    p.disconnectedAt = null;
+    p.eliminated = false;
+  });
+
+  const avgHumanEol =
+    room.players.length > 0
+      ? Math.round(room.players.reduce((acc, p) => acc + p.eol, 0) / room.players.length)
+      : 400;
+
+  const aiSeats: OnlineAiSeat[] = [];
+  for (let idx = room.players.length; idx < shuffled.length; idx++) {
+    const aiSide = shuffled[idx];
+    const requestedLvl = customAiLevels?.[idx - room.players.length];
+    const validLvl: AiDifficultyLevel =
+      typeof requestedLvl === 'number' && requestedLvl >= 1 && requestedLvl <= 10
+        ? (Math.round(requestedLvl) as AiDifficultyLevel)
+        : getClosestAiLevelForEol(avgHumanEol);
+    const meta = AI_LEVELS.find((l) => l.level === validLvl) || AI_LEVELS[2];
+    aiSeats.push({
+      side: aiSide,
+      level: validLvl,
+      approxEol: meta.approxEol,
+      nickname: `IA ${meta.label}`,
+    });
+  }
+
+  room.aiSeats = aiSeats;
+  room.activeSides = activeSides;
+  room.eliminatedSides = [];
+  room.turnSide = activeSides[0] || 'white';
+  room.clocks = buildInitialClocks(room.variant);
+  room.incrementSec = Math.max(0, room.variant.incrementSec || 0);
+  room.status = 'active';
+  room.hostUserId = room.players[0]?.userId || '';
+
+  const participants: OnlineHumanSeat[] = room.players.map((p) => ({
+    userId: p.userId,
+    nickname: p.nickname,
+    eol: p.eol,
+    side: p.side,
+    theme: p.theme,
+  }));
+
+  for (const p of room.players) {
+    const firstOther = room.players.find((other) => other.userId !== p.userId);
+    const oppFallback = firstOther
+      ? {
+          userId: firstOther.userId,
+          nickname: firstOther.nickname,
+          eol: firstOther.eol,
+          theme: firstOther.theme,
+        }
+      : {
+          userId: 'ai_companion',
+          nickname: aiSeats[0]?.nickname || 'IA Chess Lab',
+          eol: aiSeats[0]?.approxEol || 400,
+        };
+
+    safeSend(p.ws, {
+      type: 'match:found',
+      roomId: room.roomId,
+      code: room.code,
+      yourSide: p.side,
+      competitive: room.competitive,
+      variant: room.variant,
+      opponent: oppFallback,
+      participants,
+      aiSeats,
+      hostUserId: room.hostUserId,
+      clocks: room.clocks,
+      turnSide: room.turnSide,
+    });
+  }
+}
+
 function tryMatchQueue() {
+  matchmakingQueue = matchmakingQueue.filter((q) => q.ws.readyState === WebSocket.OPEN);
   if (matchmakingQueue.length < 2) return;
   const now = Date.now();
 
+  // 1. Prioritize multi-player variant groups (>2 players): wait up to 9s for extra humans, then launch with AI fill
+  const multiGroups = new Map<string, QueueEntry[]>();
+  for (const entry of matchmakingQueue) {
+    if (entry.variantId && entry.variantSnapshot && (entry.variantSnapshot.players || 2) > 2) {
+      const key = `${entry.variantId}::${entry.competitive ? 'c' : 'f'}`;
+      const list = multiGroups.get(key) || [];
+      if (!list.some((x) => x.userId === entry.userId)) {
+        list.push(entry);
+        multiGroups.set(key, list);
+      }
+    }
+  }
+
+  for (const [, group] of multiGroups) {
+    const sampleVariant =
+      db.variants.find((v) => v.id === group[0].variantId) || group[0].variantSnapshot;
+    if (!sampleVariant) continue;
+    const targetPlayers = Math.max(3, Math.min(6, sampleVariant.players || 4));
+    const oldestWaitSec = Math.max(...group.map((g) => (now - g.joinedAt) / 1000));
+
+    if (group.length >= targetPlayers || (group.length >= 2 && oldestWaitSec >= 8.5)) {
+      const selected = group.slice(0, targetPlayers);
+      const selectedIds = new Set(selected.map((s) => s.userId));
+      matchmakingQueue = matchmakingQueue.filter((q) => !selectedIds.has(q.userId));
+
+      const roomId = crypto.randomUUID();
+      const code = generateRoomCode();
+      const room: OnlineRoom = {
+        roomId,
+        code,
+        variant: sampleVariant,
+        competitive: selected[0].competitive,
+        targetPlayers,
+        hostUserId: selected[0].userId,
+        players: selected.map((s) => ({
+          ws: s.ws,
+          userId: s.userId,
+          nickname: s.nickname,
+          eol: s.eol,
+          side: 'white',
+          theme: s.theme,
+        })),
+        aiSeats: [],
+        activeSides: [],
+        eliminatedSides: [],
+        turnSide: 'white',
+        clocks: buildInitialClocks(sampleVariant),
+        incrementSec: Math.max(0, sampleVariant.incrementSec || 0),
+        moves: [],
+        drawOfferFrom: null,
+        status: 'waiting',
+        winnerSide: null,
+        createdAt: Date.now(),
+      };
+      rooms.set(roomId, room);
+      roomByCode.set(code, roomId);
+      launchOnlineRoom(room);
+      return;
+    }
+  }
+
+  // 2. Standard 2-player ELO-balanced matchmaking (tight gap early -> full pool before 10s expiry)
   for (let i = 0; i < matchmakingQueue.length; i++) {
     const a = matchmakingQueue[i];
     if (a.ws.readyState !== WebSocket.OPEN) continue;
@@ -162,15 +376,16 @@ function tryMatchQueue() {
       if (a.userId === b.userId) continue;
 
       const compatible =
-        (a.mode === 'random' && b.mode === 'random') ||
-        (a.mode === 'specific' && b.mode === 'specific' && a.variantId === b.variantId) ||
-        (a.mode === 'specific' && b.mode === 'random') ||
-        (a.mode === 'random' && b.mode === 'specific');
+        a.competitive === b.competitive &&
+        ((a.mode === 'random' && b.mode === 'random') ||
+          (a.mode === 'specific' && b.mode === 'specific' && a.variantId === b.variantId) ||
+          (a.mode === 'specific' && b.mode === 'random') ||
+          (a.mode === 'random' && b.mode === 'specific'));
 
       if (!compatible) continue;
 
       const waitSec = Math.max((now - a.joinedAt) / 1000, (now - b.joinedAt) / 1000);
-      const maxGap = waitSec > 4 ? 1000 : 250;
+      const maxGap = waitSec >= 6.5 ? 99999 : waitSec >= 3 ? 600 : 220;
       const diff = Math.abs(a.eol - b.eol);
       if (diff <= maxGap && diff < bestDiff) {
         bestDiff = diff;
@@ -199,43 +414,34 @@ function tryMatchQueue() {
 
       const roomId = crypto.randomUUID();
       const code = generateRoomCode();
-      const firstIsWhite = crypto.randomInt(0, 2) === 0;
-      const sideA: 'white' | 'black' = firstIsWhite ? 'white' : 'black';
-      const sideB: 'white' | 'black' = firstIsWhite ? 'black' : 'white';
+      const targetPlayers = Math.max(2, Math.min(6, chosenVariant.players || 2));
 
       const room: OnlineRoom = {
         roomId,
         code,
         variant: chosenVariant,
+        competitive: a.competitive,
+        targetPlayers,
+        hostUserId: a.userId,
         players: [
-          { ws: a.ws, userId: a.userId, nickname: a.nickname, eol: a.eol, side: sideA, theme: a.theme },
-          { ws: b.ws, userId: b.userId, nickname: b.nickname, eol: b.eol, side: sideB, theme: b.theme },
+          { ws: a.ws, userId: a.userId, nickname: a.nickname, eol: a.eol, side: 'white', theme: a.theme },
+          { ws: b.ws, userId: b.userId, nickname: b.nickname, eol: b.eol, side: 'black', theme: b.theme },
         ],
+        aiSeats: [],
+        activeSides: [],
+        eliminatedSides: [],
+        turnSide: 'white',
+        clocks: buildInitialClocks(chosenVariant),
+        incrementSec: Math.max(0, chosenVariant.incrementSec || 0),
         moves: [],
         drawOfferFrom: null,
-        status: 'active',
+        status: 'waiting',
         winnerSide: null,
         createdAt: Date.now(),
       };
       rooms.set(roomId, room);
       roomByCode.set(code, roomId);
-
-      safeSend(a.ws, {
-        type: 'match:found',
-        roomId,
-        code,
-        yourSide: sideA,
-        variant: chosenVariant,
-        opponent: { userId: b.userId, nickname: b.nickname, eol: b.eol, theme: b.theme },
-      });
-      safeSend(b.ws, {
-        type: 'match:found',
-        roomId,
-        code,
-        yourSide: sideB,
-        variant: chosenVariant,
-        opponent: { userId: a.userId, nickname: a.nickname, eol: a.eol, theme: a.theme },
-      });
+      launchOnlineRoom(room);
       return;
     }
   }
@@ -507,6 +713,107 @@ async function startServer() {
     }
   });
 
+  // Periodic 1s tick: matchmaking + authoritative active room clocks + 5-min disconnect countdown
+  let tickCount = 0;
+  const mmTimer = setInterval(() => {
+    tickCount += 1;
+    if (matchmakingQueue.length >= 2) {
+      tryMatchQueue();
+    }
+
+    const now = Date.now();
+    for (const room of rooms.values()) {
+      if (room.status !== 'active') continue;
+
+      // 1. Authoritative clock continues running even if player left the app
+      if ((room.variant.duration || 0) > 0 && room.turnSide) {
+        room.clocks[room.turnSide] = Math.max(0, (room.clocks[room.turnSide] ?? 0) - 1);
+        if (room.clocks[room.turnSide] <= 0) {
+          const timedOutSide = room.turnSide;
+          if (!room.eliminatedSides.includes(timedOutSide)) {
+            room.eliminatedSides.push(timedOutSide);
+          }
+          const aliveSides = room.activeSides.filter((s) => !room.eliminatedSides.includes(s));
+          const winnerSide: PlayerSide =
+            aliveSides[0] || (timedOutSide === 'white' ? 'black' : 'white');
+          if (aliveSides.length <= 1) {
+            room.status = 'finished';
+            room.winnerSide = winnerSide;
+          } else {
+            room.turnSide = aliveSides[0];
+          }
+          for (const p of room.players) {
+            if (!p.disconnectedAt) {
+              safeSend(p.ws, {
+                type: 'game:timeout',
+                timedOutSide,
+                winnerSide,
+              });
+            }
+          }
+          continue;
+        }
+      }
+
+      // 2. Check 5-minute disconnect grace period for absent players
+      let changedGrace = false;
+      for (const p of room.players) {
+        if (p.disconnectedAt && !p.eliminated && now - p.disconnectedAt >= RECONNECT_GRACE_MS) {
+          p.disconnectedAt = null;
+          p.eliminated = true;
+          changedGrace = true;
+          if (!room.eliminatedSides.includes(p.side)) {
+            room.eliminatedSides.push(p.side);
+          }
+          const aliveSides = room.activeSides.filter((s) => !room.eliminatedSides.includes(s));
+          if (aliveSides.length <= 1) {
+            room.status = 'finished';
+            room.winnerSide = aliveSides[0] || 'draw';
+          } else if (room.turnSide === p.side) {
+            room.turnSide = aliveSides[0];
+          }
+          for (const other of room.players) {
+            if (other.userId !== p.userId && !other.disconnectedAt) {
+              safeSend(other.ws, {
+                type: 'game:opponent_resigned',
+                resignedSide: p.side,
+                autoDisconnect: true,
+                reason: `Abandon automatique de ${p.nickname} (déconnexion de 5 minutes).`,
+              });
+            }
+          }
+        }
+      }
+
+      // 3. Broadcast live countdown every second when any opponent is absent
+      const disconnected = getDisconnectedSummary(room);
+      if (room.status === 'active' && (disconnected.length > 0 || changedGrace)) {
+        for (const p of room.players) {
+          if (!p.disconnectedAt) {
+            safeSend(p.ws, {
+              type: 'room:disconnect_countdown',
+              disconnectedPlayers: disconnected,
+            });
+          }
+        }
+      }
+
+      // 4. Keep clocks synced across clients every 5 seconds
+      if (room.status === 'active' && tickCount % 5 === 0 && (room.variant.duration || 0) > 0) {
+        for (const p of room.players) {
+          if (!p.disconnectedAt) {
+            safeSend(p.ws, {
+              type: 'room:clocks_sync',
+              clocks: room.clocks,
+              turnSide: room.turnSide,
+            });
+          }
+        }
+      }
+    }
+  }, 1000);
+  server.on('close', () => clearInterval(mmTimer));
+
   wss.on('connection', (ws) => {
     let boundRoomId: string | null = null;
     let boundUserId: string | null = null;
@@ -529,6 +836,7 @@ async function startServer() {
         const nickname = sanitizeNick(msg.nickname, 'Joueur');
         const eol = Number(msg.eol || 400);
         const mode = msg.mode === 'random' ? 'random' : 'specific';
+        const competitive = msg.competitive !== false;
         const variantId = typeof msg.variantId === 'string' ? msg.variantId : null;
         const variantSnapshot = msg.variantSnapshot as Variant | undefined;
         const theme = msg.theme as QueueEntry['theme'];
@@ -541,6 +849,7 @@ async function startServer() {
           nickname,
           eol,
           mode,
+          competitive,
           variantId,
           variantSnapshot,
           joinedAt: Date.now(),
@@ -554,6 +863,7 @@ async function startServer() {
         const userId = String(msg.userId || '');
         const nickname = sanitizeNick(msg.nickname, 'Hôte');
         const eol = Number(msg.eol || 400);
+        const competitive = msg.competitive !== false;
         const variant = msg.variant as Variant;
         const theme = msg.theme as PlayerConn['theme'];
         if (!variant) return;
@@ -561,11 +871,21 @@ async function startServer() {
 
         const roomId = crypto.randomUUID();
         const code = generateRoomCode();
+        const targetPlayers = Math.max(2, Math.min(6, variant.players || 2));
         const room: OnlineRoom = {
           roomId,
           code,
           variant,
+          competitive,
+          targetPlayers,
+          hostUserId: userId,
           players: [{ ws, userId, nickname, eol, side: 'white', theme }],
+          aiSeats: [],
+          activeSides: [],
+          eliminatedSides: [],
+          turnSide: 'white',
+          clocks: buildInitialClocks(variant),
+          incrementSec: Math.max(0, variant.incrementSec || 0),
           moves: [],
           drawOfferFrom: null,
           status: 'waiting',
@@ -575,7 +895,19 @@ async function startServer() {
         rooms.set(roomId, room);
         roomByCode.set(code, roomId);
         boundRoomId = roomId;
-        safeSend(ws, { type: 'room:created', roomId, code, yourSide: 'white' });
+        safeSend(ws, {
+          type: 'room:created',
+          roomId,
+          code,
+          competitive,
+          targetPlayers,
+          hostUserId: room.hostUserId,
+          players: room.players.map((p) => ({
+            userId: p.userId,
+            nickname: p.nickname,
+            eol: p.eol,
+          })),
+        });
       } else if (type === 'room:join') {
         const code = String(msg.code || '').trim().toUpperCase();
         const userId = String(msg.userId || '');
@@ -590,41 +922,157 @@ async function startServer() {
           safeSend(ws, { type: 'room:error', message: 'Code de salle introuvable.' });
           return;
         }
-        if (room.players.length >= 2) {
-          safeSend(ws, { type: 'room:error', message: 'Cette salle est déjà complète.' });
+        if (room.status !== 'waiting' || room.players.length >= room.targetPlayers) {
+          safeSend(ws, {
+            type: 'room:error',
+            message: 'Cette salle est déjà complète ou déjà lancée.',
+          });
           return;
         }
-        const host = room.players[0];
-        const guest: PlayerConn = { ws, userId, nickname, eol, side: 'black', theme };
-        room.players.push(guest);
-        room.status = 'active';
+
+        const existingPlayer = room.players.find((p) => p.userId === userId);
+        if (existingPlayer) {
+          existingPlayer.ws = ws;
+        } else {
+          const guest: PlayerConn = { ws, userId, nickname, eol, side: 'black', theme };
+          room.players.push(guest);
+        }
         boundRoomId = room.roomId;
 
-        safeSend(host.ws, {
-          type: 'match:found',
+        if (room.players.length >= room.targetPlayers) {
+          launchOnlineRoom(room);
+        } else {
+          const lobbyPayload = {
+            type: 'room:lobby_update',
+            roomId: room.roomId,
+            code: room.code,
+            competitive: room.competitive,
+            targetPlayers: room.targetPlayers,
+            hostUserId: room.hostUserId,
+            variant: room.variant,
+            players: room.players.map((p) => ({
+              userId: p.userId,
+              nickname: p.nickname,
+              eol: p.eol,
+            })),
+          };
+          for (const p of room.players) {
+            safeSend(p.ws, lobbyPayload);
+          }
+        }
+      } else if (type === 'room:start_with_ai') {
+        const roomId = String(msg.roomId || boundRoomId || '');
+        const room = rooms.get(roomId);
+        if (!room || room.status !== 'waiting') return;
+        if (room.hostUserId !== boundUserId) return;
+        const aiLevels = Array.isArray(msg.aiLevels)
+          ? (msg.aiLevels.map((n) => Number(n)) as number[])
+          : undefined;
+        launchOnlineRoom(room, aiLevels);
+      } else if (type === 'room:reconnect') {
+        const reqRoomId = String(msg.roomId || '');
+        const reqCode = String(msg.code || '').trim().toUpperCase();
+        const userId = String(msg.userId || '');
+        const resolvedId = reqRoomId || (reqCode ? roomByCode.get(reqCode) || '' : '');
+        const room = resolvedId ? rooms.get(resolvedId) : undefined;
+        if (!room || room.status !== 'active') {
+          safeSend(ws, { type: 'room:reconnect_expired' });
+          return;
+        }
+        const player = room.players.find((p) => p.userId === userId && !p.eliminated);
+        if (!player) {
+          safeSend(ws, { type: 'room:reconnect_expired' });
+          return;
+        }
+        player.ws = ws;
+        player.disconnectedAt = null;
+        boundRoomId = room.roomId;
+        boundUserId = userId;
+
+        const participants: OnlineHumanSeat[] = room.players.map((p) => ({
+          userId: p.userId,
+          nickname: p.nickname,
+          eol: p.eol,
+          side: p.side,
+          theme: p.theme,
+        }));
+        const firstOther = room.players.find((other) => other.userId !== userId);
+        const oppFallback = firstOther
+          ? {
+              userId: firstOther.userId,
+              nickname: firstOther.nickname,
+              eol: firstOther.eol,
+              theme: firstOther.theme,
+            }
+          : {
+              userId: 'ai_companion',
+              nickname: room.aiSeats[0]?.nickname || 'IA Chess Lab',
+              eol: room.aiSeats[0]?.approxEol || 400,
+            };
+        const disconnected = getDisconnectedSummary(room);
+
+        safeSend(ws, {
+          type: 'room:state_sync',
           roomId: room.roomId,
           code: room.code,
-          yourSide: 'white',
+          yourSide: player.side,
+          competitive: room.competitive,
           variant: room.variant,
-          opponent: { userId: guest.userId, nickname: guest.nickname, eol: guest.eol, theme: guest.theme },
+          opponent: oppFallback,
+          participants,
+          aiSeats: room.aiSeats,
+          hostUserId: room.hostUserId,
+          moves: room.moves,
+          clocks: room.clocks,
+          turnSide: room.turnSide,
+          eliminatedSides: room.eliminatedSides,
+          disconnectedPlayers: disconnected,
         });
-        safeSend(guest.ws, {
-          type: 'match:found',
-          roomId: room.roomId,
-          code: room.code,
-          yourSide: 'black',
-          variant: room.variant,
-          opponent: { userId: host.userId, nickname: host.nickname, eol: host.eol, theme: host.theme },
-        });
+
+        for (const other of room.players) {
+          if (other.userId !== userId && !other.disconnectedAt) {
+            safeSend(other.ws, {
+              type: 'room:player_reconnected',
+              userId: player.userId,
+              nickname: player.nickname,
+              side: player.side,
+              disconnectedPlayers: disconnected,
+            });
+          }
+        }
       } else if (type === 'game:move') {
         const roomId = String(msg.roomId || boundRoomId || '');
         const room = rooms.get(roomId);
         if (!room || room.status !== 'active') return;
+        const movingSide = room.turnSide;
         room.moves.push(msg.move);
         room.drawOfferFrom = null;
+
+        if ((room.variant.duration || 0) > 0 && room.incrementSec > 0 && msg.turnFinished !== false) {
+          room.clocks[movingSide] = (room.clocks[movingSide] || 0) + room.incrementSec;
+        }
+        if (Array.isArray(msg.eliminatedSides)) {
+          room.eliminatedSides = (msg.eliminatedSides as PlayerSide[]).filter((s) =>
+            VALID_SIDES.includes(s)
+          );
+        }
+        if (typeof msg.nextTurnSide === 'string' && VALID_SIDES.includes(msg.nextTurnSide as PlayerSide)) {
+          room.turnSide = msg.nextTurnSide as PlayerSide;
+        }
+        if (msg.winner) {
+          room.status = 'finished';
+          room.winnerSide = String(msg.winner);
+        }
+
         for (const p of room.players) {
-          if (p.ws !== ws) {
-            safeSend(p.ws, { type: 'game:move', move: msg.move, fromUserId: boundUserId });
+          if (p.ws !== ws && !p.disconnectedAt) {
+            safeSend(p.ws, {
+              type: 'game:move',
+              move: msg.move,
+              fromUserId: boundUserId,
+              clocks: room.clocks,
+              turnSide: room.turnSide,
+            });
           }
         }
       } else if (type === 'game:offer_draw') {
@@ -655,13 +1103,41 @@ async function startServer() {
         const roomId = String(msg.roomId || boundRoomId || '');
         const room = rooms.get(roomId);
         if (!room || room.status !== 'active') return;
-        room.status = 'finished';
-        const resigner = room.players.find((p) => p.ws === ws);
+        if (room.players.length <= 2 && room.aiSeats.length === 0) {
+          room.status = 'finished';
+        }
+        const resigner = room.players.find((p) => p.ws === ws || p.userId === boundUserId);
+        if (resigner) {
+          resigner.eliminated = true;
+          resigner.disconnectedAt = null;
+        }
         for (const p of room.players) {
-          if (p.ws !== ws) {
+          if (p.ws !== ws && !p.disconnectedAt) {
             safeSend(p.ws, {
               type: 'game:opponent_resigned',
               resignedSide: resigner?.side || 'white',
+            });
+          }
+        }
+      } else if (type === 'game:timeout') {
+        const roomId = String(msg.roomId || boundRoomId || '');
+        const room = rooms.get(roomId);
+        if (!room || room.status !== 'active') return;
+        const rawSide = String(msg.timedOutSide || 'white') as PlayerSide;
+        const timedOutSide: PlayerSide = VALID_SIDES.includes(rawSide) ? rawSide : 'white';
+        const activeSides = getVariantActiveSides(room.variant);
+        const remainingHumanOrAi = activeSides.filter((s) => s !== timedOutSide);
+        const winnerSide: PlayerSide = remainingHumanOrAi[0] || (timedOutSide === 'white' ? 'black' : 'white');
+        if (activeSides.length <= 2) {
+          room.status = 'finished';
+          room.winnerSide = winnerSide;
+        }
+        for (const p of room.players) {
+          if (!p.disconnectedAt) {
+            safeSend(p.ws, {
+              type: 'game:timeout',
+              timedOutSide,
+              winnerSide,
             });
           }
         }
@@ -673,10 +1149,25 @@ async function startServer() {
       if (boundRoomId) {
         const room = rooms.get(boundRoomId);
         if (room && room.status === 'active') {
-          for (const p of room.players) {
-            if (p.ws !== ws) {
-              safeSend(p.ws, { type: 'game:opponent_disconnected' });
+          const leaving = room.players.find((p) => p.ws === ws);
+          if (leaving && !leaving.eliminated) {
+            leaving.disconnectedAt = Date.now();
+          }
+          const alive = room.players.filter(
+            (p) => p.ws !== ws && !p.disconnectedAt && p.ws.readyState === WebSocket.OPEN
+          );
+          if (room.hostUserId === boundUserId && alive.length > 0) {
+            room.hostUserId = alive[0].userId;
+            for (const p of alive) {
+              safeSend(p.ws, { type: 'room:host_changed', hostUserId: room.hostUserId });
             }
+          }
+          const disconnected = getDisconnectedSummary(room);
+          for (const p of alive) {
+            safeSend(p.ws, {
+              type: 'room:disconnect_countdown',
+              disconnectedPlayers: disconnected,
+            });
           }
         }
       }

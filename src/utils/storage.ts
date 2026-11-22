@@ -9,12 +9,13 @@ import type {
   Variant,
 } from '../types/chess';
 import { getStarterVariants, STARTER_PIECES } from './defaultVariants';
+import { safeUuid } from './safeId';
 
 const STORAGE_KEY = 'chesslab_app_v2';
 
 export function createDefaultProfile(): Profile {
   return {
-    id: `usr_${crypto.randomUUID().slice(0, 12)}`,
+    id: `usr_${safeUuid().slice(0, 12)}`,
     nickname: '',
     avatarColor: '#7ebcff',
     avatarSymbol: '♔',
@@ -65,21 +66,33 @@ export function loadLocalState(): AppState {
     const parsed = JSON.parse(raw) as Partial<AppState>;
     const blank = createBlankState();
 
-    // Ensure starter pieces/variants exist if user hasn't deleted everything
-    const mergedVariants = Array.isArray(parsed.variants) && parsed.variants.length > 0
-      ? parsed.variants
-      : blank.variants;
-    const mergedPieces = Array.isArray(parsed.pieces) && parsed.pieces.length > 0
-      ? parsed.pieces
-      : blank.pieces;
+    // Validate & sanitize stored variants/pieces/boards/history so a malformed record never crashes render
+    const validVariants = Array.isArray(parsed.variants)
+      ? parsed.variants.filter(
+          (v): v is Variant =>
+            Boolean(v && typeof v.id === 'string' && v.board && Array.isArray(v.board.cells))
+        )
+      : [];
+    const validPieces = Array.isArray(parsed.pieces)
+      ? parsed.pieces.filter((p): p is PieceDef => Boolean(p && typeof p.id === 'string' && p.name))
+      : [];
+    const validBoards = Array.isArray(parsed.boards)
+      ? parsed.boards.filter((b): b is BoardConfig => Boolean(b && Array.isArray(b.cells)))
+      : [];
+    const validHistory = Array.isArray(parsed.history)
+      ? parsed.history.filter((h): h is GameRecord => Boolean(h && typeof h.id === 'string'))
+      : [];
+
+    const mergedVariants = validVariants.length > 0 ? validVariants : blank.variants;
+    const mergedPieces = validPieces.length > 0 ? validPieces : blank.pieces;
 
     return {
       profile: { ...blank.profile, ...(parsed.profile || {}) },
       variants: mergedVariants,
-      boards: Array.isArray(parsed.boards) ? parsed.boards : [],
+      boards: validBoards,
       pieces: mergedPieces,
-      history: Array.isArray(parsed.history) ? parsed.history : [],
-      ratings: parsed.ratings || {},
+      history: validHistory,
+      ratings: parsed.ratings && typeof parsed.ratings === 'object' ? parsed.ratings : {},
       settings: { ...blank.settings, ...(parsed.settings || {}) },
     };
   } catch {
@@ -91,7 +104,99 @@ export function saveLocalState(state: AppState): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
-    // Ignore quota errors
+    try {
+      // Fallback: preserve all records while stripping bulky replay payloads on older games
+      const trimmed: AppState = {
+        ...state,
+        history: state.history.map((rec, idx) =>
+          idx < 25 ? rec : { ...rec, replayMoves: undefined, variantSnapshot: undefined }
+        ),
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+    } catch {
+      // Ignore quota errors
+    }
+  }
+}
+
+export interface StoredOnlineSession {
+  roomId: string;
+  code: string;
+  userId: string;
+  variantId?: string;
+  competitive?: boolean;
+  savedAt: number;
+}
+
+const ONLINE_SESSION_KEY = 'chesslab_active_online_v1';
+
+export function saveActiveOnlineSession(session: StoredOnlineSession): void {
+  try {
+    localStorage.setItem(ONLINE_SESSION_KEY, JSON.stringify(session));
+  } catch {
+    // ignore
+  }
+}
+
+export function loadActiveOnlineSession(): StoredOnlineSession | null {
+  try {
+    const raw = localStorage.getItem(ONLINE_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredOnlineSession;
+    // Expire after 6 minutes cleanly (matches 5-min server grace + margin)
+    if (!parsed?.roomId || Date.now() - (parsed.savedAt || 0) > 6 * 60 * 1000) {
+      localStorage.removeItem(ONLINE_SESSION_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearActiveOnlineSession(): void {
+  try {
+    localStorage.removeItem(ONLINE_SESSION_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+export interface StoredNavSession {
+  screen: string;
+  selectedPlayVariantId: string | null;
+  playInitialMode: 'ai' | 'local' | 'online' | 'analysis';
+  playInitialCompetitive: boolean;
+  variantDraft?: Variant;
+}
+
+const NAV_SESSION_KEY = 'chesslab_nav_session_v1';
+
+export function saveSessionNav(nav: StoredNavSession): void {
+  try {
+    sessionStorage.setItem(NAV_SESSION_KEY, JSON.stringify(nav));
+  } catch {
+    // ignore quota / restricted webview
+  }
+}
+
+export function loadSessionNav(): StoredNavSession | null {
+  try {
+    const raw = sessionStorage.getItem(NAV_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredNavSession;
+    if (!parsed || typeof parsed.screen !== 'string') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function clearSessionNav(): void {
+  try {
+    sessionStorage.removeItem(NAV_SESSION_KEY);
+  } catch {
+    // ignore
   }
 }
 

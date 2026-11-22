@@ -21,21 +21,41 @@ export interface CompiledVariantRules {
   noBackwardPieces: string[];
   noBackwardExemptPieces: string[];
   noBackwardExceptSpecial: boolean;
+  noBackwardCaptureAll: boolean;
+  noBackwardCapturePieces: string[];
   allowPawnBackward: boolean;
+  allowPawnBackwardSides: PlayerSide[];
   pawnCaptureForward: boolean;
+  berolinaPawns: boolean;
+  alwaysPawnDoubleStep: boolean;
+  pawnInitialSteps: number; // default 2
   allCanJump: boolean;
   canJumpPieces: string[];
+  forbidJumpPieces: string[];
+  immobilePieces: string[];
   forbidDiagonalPieces: string[];
   forbidOrthogonalPieces: string[];
   grantPieceMoves: Record<string, string[]>;
+  replacePieceMoves: Record<string, string[]>;
+  specialGrantPieceMoves: Record<string, string[]>;
   pieceMaxSteps: Record<string, number>;
   noSidewaysPieces: string[];
   strictlyForwardPieces: string[];
+  onlyLightSquarePieces: string[];
+  onlyDarkSquarePieces: string[];
+  forbidLightSquarePieces: string[];
+  forbidDarkSquarePieces: string[];
   mandatoryCapture: boolean;
   allowFriendlyCapture: boolean;
   noCaptureBeforeTurn: number; // 0 = allowed from turn 1
   extraActionOnCapture: boolean;
   promoteOnCapturePieces: string[];
+  promoteOnCaptureTarget: string;
+  specialPromoteTarget: string;
+  kamikazeOnCapture: boolean;
+  atomicCapture: boolean;
+  protectedByAllyUncapturable: boolean;
+  captureValueRule: 'none' | 'equal_or_weaker' | 'strictly_weaker' | 'same_piece_only' | 'not_same_piece';
   actionsPerTurnOverride: number; // 0 = use variant.actions
   captureTargetOverride: number; // 0 = use variant.captureTarget
   disableCastling: boolean;
@@ -49,15 +69,20 @@ export interface CompiledVariantRules {
   forbiddenSpecialPieces: string[];
   onlySpecialPieces: string[];
   maxStepsPerMove: number; // 0 = unlimited
+  wrapHorizontal: boolean;
   noCapturePieces: string[];
   captureRestrictions: VariantCaptureRestriction[];
   checksTarget: number; // 0 = disabled
   reverseWin: boolean;
+  stalemateWins: boolean;
   reachOppositeRankPieces: string[];
   specialWinPieces: string[];
   effectiveSpecialEffect: SpecialCellEffectType;
   turnOrderSides: PlayerSide[];
   hasCustomTurnOrder: boolean;
+  teams: PlayerSide[][];
+  teamSharedElimination: boolean;
+  allowTeammateCapture: boolean;
   hasAnyCustomEnforcement: boolean;
   activeRules: DetectedRuleBadge[];
   unrecognizedSentences: string[];
@@ -109,22 +134,71 @@ const BUILTIN_PIECE_LABELS: Record<string, string> = {
   'builtin:K': 'Roi',
 };
 
+const EXTRA_BUILTIN_LABELS: Record<string, string> = {
+  ...BUILTIN_PIECE_LABELS,
+  builtin: 'Pièces classiques',
+};
+
+const SIDE_ADJECTIVES_PLURAL: Record<PlayerSide, string> = {
+  white: 'blanches',
+  black: 'noires',
+  red: 'rouges',
+  blue: 'bleues',
+  green: 'vertes',
+  gold: 'dorées',
+};
+
+const SIDE_NOUNS_PLURAL: Record<PlayerSide, string> = {
+  white: 'Blancs',
+  black: 'Noirs',
+  red: 'Rouges',
+  blue: 'Bleus',
+  green: 'Verts',
+  gold: 'Or',
+};
+
+const VALID_PLAYER_SIDES = new Set<PlayerSide>(['white', 'black', 'red', 'blue', 'green', 'gold']);
+
+export function parsePieceFilter(filter: PieceTargetFilter): { base: string; side?: PlayerSide } {
+  const idx = filter.lastIndexOf('@');
+  if (idx > 0) {
+    const side = filter.slice(idx + 1) as PlayerSide;
+    if (VALID_PLAYER_SIDES.has(side)) {
+      return { base: filter.slice(0, idx), side };
+    }
+  }
+  return { base: filter };
+}
+
 export function getPieceFilterLabel(
   filter: PieceTargetFilter,
   customPieces: PieceDef[] = []
 ): string {
-  if (BUILTIN_PIECE_LABELS[filter]) return BUILTIN_PIECE_LABELS[filter];
-  const found = customPieces.find((p) => p.id === filter);
-  return found ? found.name : filter;
+  const { base, side } = parsePieceFilter(filter);
+  if (side && base === 'all') {
+    return `Pièces ${SIDE_ADJECTIVES_PLURAL[side]}`;
+  }
+  const baseLabel =
+    EXTRA_BUILTIN_LABELS[base] ||
+    customPieces.find((p) => p.id === base)?.name ||
+    base;
+  if (side) {
+    return `${baseLabel} (${SIDE_NOUNS_PLURAL[side]})`;
+  }
+  return baseLabel;
 }
 
 export function doesPieceMatchFilter(
   pieceId: string,
-  filter: PieceTargetFilter
+  filter: PieceTargetFilter,
+  pieceSide?: PlayerSide
 ): boolean {
-  if (filter === 'all') return true;
-  if (filter === 'custom') return !pieceId.startsWith('builtin:');
-  return pieceId === filter;
+  const { base, side: filterSide } = parsePieceFilter(filter);
+  if (filterSide && pieceSide !== filterSide) return false;
+  if (base === 'all') return true;
+  if (base === 'custom') return !pieceId.startsWith('builtin:');
+  if (base === 'builtin') return pieceId.startsWith('builtin:');
+  return pieceId === base;
 }
 
 function buildPieceKeywordMap(customPieces: PieceDef[]): { keyword: string; pieceId: string }[] {
@@ -175,36 +249,181 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function detectColorsInSegment(seg: string): PlayerSide[] {
+  const colors: PlayerSide[] = [];
+  if (/\bblanc(?:he)?s?\b/.test(seg) || /\bwhites?\b/.test(seg)) colors.push('white');
+  if (/\bnoire?s?\b/.test(seg) || /\bblacks?\b/.test(seg)) colors.push('black');
+  if (/\brouges?\b/.test(seg) || /\breds?\b/.test(seg)) colors.push('red');
+  if (/\bbleue?s?\b/.test(seg) || /\bblues?\b/.test(seg)) colors.push('blue');
+  if (/\bvert(?:e)?s?\b/.test(seg) || /\bgreens?\b/.test(seg)) colors.push('green');
+  if (
+    /\b(?:dore(?:e)?s?|jaunes?|golds?)\b/.test(seg) ||
+    /\b(?:pieces?|camp|equipe|joueur|pions?|cavaliers?|fous?|tours?|dames?|reines?|rois?)\s+or\b/.test(seg) ||
+    /\b(?:et|avec|,)\s+or\b/.test(seg)
+  ) {
+    colors.push('gold');
+  }
+  return colors;
+}
+
+export function extractSideMentionsInOrder(rawSegment: string): PlayerSide[] {
+  const clean = normalizeFr(rawSegment).replace(
+    /\b(?:sur\s+(?:une?|les?|des)\s+)?cases?\s+(?:blanches?|claires?|noires?|foncees?)\b/g,
+    ' '
+  );
+  const patterns: { side: PlayerSide; re: RegExp }[] = [
+    { side: 'white', re: /\b(?:blancs?|blanches?|white|j1|joueur\s*1)\b/g },
+    { side: 'black', re: /\b(?:noirs?|noires?|black|j2|joueur\s*2)\b/g },
+    { side: 'red', re: /\b(?:rouges?|red|j3|joueur\s*3)\b/g },
+    { side: 'blue', re: /\b(?:bleus?|bleues?|blue|j4|joueur\s*4)\b/g },
+    { side: 'green', re: /\b(?:verts?|vertes?|green|j5|joueur\s*5)\b/g },
+    { side: 'gold', re: /\b(?:dore(?:e)?s?|jaunes?|golds?|j6|joueur\s*6)\b|\bor\b/g },
+  ];
+  const hits: { idx: number; side: PlayerSide }[] = [];
+  for (const { side, re } of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(clean)) !== null) {
+      hits.push({ idx: m.index, side });
+    }
+  }
+  hits.sort((a, b) => a.idx - b.idx);
+  const out: PlayerSide[] = [];
+  for (const h of hits) {
+    if (!out.includes(h.side)) out.push(h.side);
+  }
+  return out;
+}
+
+export function getTeamSides(
+  compiled: Pick<CompiledVariantRules, 'teams'> | undefined,
+  side: PlayerSide
+): PlayerSide[] {
+  const team = compiled?.teams?.find((g) => g.includes(side));
+  return team && team.length > 0 ? team : [side];
+}
+
+export function areSidesAllied(
+  compiled: Pick<CompiledVariantRules, 'teams'> | undefined,
+  sideA: PlayerSide,
+  sideB: PlayerSide
+): boolean {
+  if (sideA === sideB) return true;
+  if (!compiled?.teams || compiled.teams.length === 0) return false;
+  return compiled.teams.some((g) => g.includes(sideA) && g.includes(sideB));
+}
+
+export function getRemainingTeamGroups(
+  compiled: Pick<CompiledVariantRules, 'teams'> | undefined,
+  activeSides: PlayerSide[],
+  eliminatedSides: PlayerSide[]
+): PlayerSide[][] {
+  const alive = activeSides.filter((s) => !eliminatedSides.includes(s));
+  const groups: PlayerSide[][] = [];
+  const seen = new Set<PlayerSide>();
+  for (const s of alive) {
+    if (seen.has(s)) continue;
+    const teamAlive = getTeamSides(compiled, s).filter((m) => alive.includes(m));
+    for (const m of teamAlive) seen.add(m);
+    groups.push(teamAlive.length > 0 ? teamAlive : [s]);
+  }
+  return groups;
+}
+
+export function formatTeamLabel(teamSides: PlayerSide[]): string {
+  return teamSides.map((s) => SIDE_NOUNS_PLURAL[s] || s).join(' & ');
+}
+
 function extractPieceRefs(
   fragment: string,
   keywordMap: { keyword: string; pieceId: string }[]
 ): string[] {
   const clean = normalizeFr(fragment);
-  const found = new Set<string>();
-  for (const entry of keywordMap) {
-    // Word boundary-ish match compatible with apostrophes
-    const re = new RegExp(`(?:^|[^a-z0-9])${escapeRegex(entry.keyword)}(?:$|[^a-z0-9])`);
-    if (re.test(clean)) {
-      // Prevent false positive "tour" inside "au tour" / "chaque tour" / "3e tour" / "tour de jeu"
-      if (
-        (entry.keyword === 'tour' || entry.keyword === 'tours') &&
-        /\b(?:au|du|le|ce|chaque|premier|dernier|prochain|\d+e?)\s+tour\b/.test(clean) &&
-        !/\b(?:la|les|une|des)\s+tours?\b/.test(clean)
-      ) {
-        continue;
+  // Strip square color phrases BEFORE inspecting piece colors so "cases noires" never tags a piece as @black
+  const noSquareColors = clean.replace(
+    /\b(?:sur\s+(?:une?|les?|des)\s+)?cases?\s+(?:blanches?|claires?|noires?|foncees?)\b/g,
+    ' '
+  );
+
+  const rawSegments = noSquareColors
+    .split(/(?:\s*,\s*|\s+(?:et|ou|ni)\s+)/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const segments = rawSegments.length > 0 ? rawSegments : [noSquareColors];
+
+  const parsedSegments = segments.map((seg) => {
+    const pieceIds: string[] = [];
+    for (const entry of keywordMap) {
+      const re = new RegExp(`(?:^|[^a-z0-9])${escapeRegex(entry.keyword)}(?:$|[^a-z0-9])`);
+      if (re.test(seg)) {
+        if (
+          (entry.keyword === 'tour' || entry.keyword === 'tours') &&
+          (/\b(?:au|du|le|ce|un|chaque|par|premier|1er|dernier|prochain|avant\s+le|apres\s+le|\d+e?)\s+tours?\b/.test(seg) ||
+            /\btours?\s+de\s+jeu\b/.test(seg)) &&
+          !/\b(?:la|les|une|des|cette|ces|de\s+la|d'une|aux?)\s+tours?\b/.test(seg)
+        ) {
+          continue;
+        }
+        if (!pieceIds.includes(entry.pieceId)) {
+          pieceIds.push(entry.pieceId);
+        }
       }
-      found.add(entry.pieceId);
+    }
+
+    let baseGroup: 'custom' | 'builtin' | 'all' | null = null;
+    if (pieceIds.length === 0) {
+      if (/\b(?:pieces\s+personnalisees|pieces\s+custom|nouvelles\s+pieces)\b/.test(seg)) {
+        baseGroup = 'custom';
+      } else if (/\bpieces\s+(?:classiques|normales|de\s+base|standard)\b/.test(seg)) {
+        baseGroup = 'builtin';
+      } else if (
+        /\b(?:toutes?\s+les\s+pieces|les\s+pieces|aucune?\s+piece|n'importe\s+quelle\s+piece|toute\s+piece|chaque\s+piece|pieces?|camp|equipe|joueur)\b/.test(
+          seg
+        )
+      ) {
+        baseGroup = 'all';
+      }
+    }
+
+    const colors = detectColorsInSegment(seg);
+    return { pieceIds, baseGroup, colors };
+  });
+
+  // Propagate a trailing shared color in phrases like "les pions et les fous blancs"
+  const coloredSegs = parsedSegments.filter((s) => s.colors.length > 0);
+  if (
+    parsedSegments.length >= 2 &&
+    coloredSegs.length === 1 &&
+    coloredSegs[0] === parsedSegments[parsedSegments.length - 1] &&
+    coloredSegs[0].colors.length === 1 &&
+    coloredSegs[0].pieceIds.length > 0 &&
+    parsedSegments.slice(0, -1).every((s) => s.pieceIds.length > 0 && s.colors.length === 0)
+  ) {
+    const sharedColor = coloredSegs[0].colors[0];
+    for (let i = 0; i < parsedSegments.length - 1; i++) {
+      parsedSegments[i].colors = [sharedColor];
     }
   }
-  if (
-    found.size === 0 &&
-    /\b(?:toutes?\s+les\s+pieces|les\s+pieces|aucune\s+piece|n'importe\s+quelle\s+piece|toute\s+piece|pieces\s+personnalisees)\b/.test(
-      clean
-    )
-  ) {
-    if (clean.includes('pieces personnalisees')) found.add('custom');
-    else found.add('all');
+
+  const found = new Set<string>();
+  for (const seg of parsedSegments) {
+    if (seg.pieceIds.length > 0) {
+      for (const pid of seg.pieceIds) {
+        if (seg.colors.length > 0) {
+          for (const col of seg.colors) found.add(`${pid}@${col}`);
+        } else {
+          found.add(pid);
+        }
+      }
+    } else if (seg.colors.length > 0) {
+      const grp = seg.baseGroup || 'all';
+      for (const col of seg.colors) {
+        found.add(`${grp}@${col}`);
+      }
+    } else if (seg.baseGroup) {
+      found.add(seg.baseGroup);
+    }
   }
+
   return Array.from(found);
 }
 
@@ -518,34 +737,51 @@ function isStandardBoilerplate(cleanSentence: string): boolean {
 }
 
 function splitCompoundRuleClauses(text: string): string[] {
-  const initial = (text || '')
-    .split(/[.\n;!]+/)
+  const lines = (text || '')
+    .split(/\n+/)
+    .map((line) => line.replace(/^\s*(?:[-•*–]|\d+[.)])\s*/, '').trim())
+    .filter(Boolean);
+
+  const initial = lines
+    .flatMap((line) => line.split(/[.;!]+/))
     .map((s) => s.trim())
     .filter(Boolean);
+
   const verbDetector =
-    /(?:\bne\s+(?:peut|peuvent|mange|mangent|capture|capturent|prend|prennent)|\bn'(?:a|ont)\s+(?:pas\s+)?le\s+droit|\ba\s+le\s+droit|\bont\s+le\s+droit|\binterdit|\bobligatoire|\bpas\s+de\b|\bsans\s+(?:roque|promotion|en\s+passant|double)|\buniquement\b|\bgagne|\bvictoire|\bproteg|\binvulnerable|\bportee\s+max|\bpeut\s+sauter|\brejoue|\bmange|\bcapture|\bbouge|\bse\s+deplace)/;
+    /(?:\bne\s+(?:peut|peuvent|mange|mangent|bouffe|bouffent|capture|capturent|prend|prennent|bouge|bougent|recule|reculent|saute|sautent|va|vont)|\bn'(?:a|ont)\s+(?:pas\s+)?le\s+droit|\ba\s+le\s+droit|\bont\s+le\s+droit|\binterdit|\bobligatoire|\bpas\s+de\b|\bsans\s+(?:roque|promotion|en\s+passant|double|echec)|\buniquement\b|\bseulement\b|\bgagne|\bvictoire|\bproteg|\binvulnerable|\bimmunise|\bportee\b|\bpeut\s+(?:sauter|reculer|bouger|manger|capturer)|\bpeuvent\s+(?:sauter|reculer|bouger|manger|capturer)|\brejoue|\bdevient|\bdeviennent|\bexplose|\bdetrui|\bimmobile|\bsont\s+immobiles|\bmange|\bcapture|\bbouge|\bse\s+deplace|\bsont\s+(?:en\s+)?equipe|\bsont\s+allies?|\bfont\s+equipe|\bjouent\s+ensemble|\bcontre\b|\bvs\.?\b)/;
+
   const out: string[] = [];
   for (const part of initial) {
-    // Do NOT split on commas inside parenthetical exceptions or after short temporal/conditional prefixes
-    const etParts = part.split(
-      /\s+(?:et|mais)\s+|,\s+(?!(?:sauf|hormis|excepte|a\s+part|a\s+l'exception)\b)/i
-    );
-    if (etParts.length > 1) {
-      let current = etParts[0];
-      for (let i = 1; i < etParts.length; i++) {
-        const nextSeg = etParts[i];
+    // Do NOT split on commas before exceptions, conditions, or "ni/ou" lists
+    const sepRe =
+      /(\s+(?:et|mais|puis)\s+|,\s+(?!(?:sauf|hormis|excepte|a\s+part|a\s+l'exception|a\s+moins|si\b|s'|quand\b|lorsque\b|uniquement\b|seulement\b|ni\b|ou\b)))/i;
+    const tokens = part.split(sepRe);
+    if (tokens.length > 2) {
+      let current = tokens[0];
+      for (let i = 1; i < tokens.length; i += 2) {
+        const sep = tokens[i];
+        const nextSeg = tokens[i + 1] ?? '';
         const normCur = normalizeFr(current);
+        const normNext = normalizeFr(nextSeg);
         const isLeadingCondition =
-          /^(?:si|quand|lorsque|apres|avant|en\s+cas|des\s+qu|au\s+(?:premier|1er))\b/.test(normCur);
+          /^(?:si|quand|lorsque|apres|avant|en\s+cas|des\s+qu|au\s+(?:premier|1er)|a\s+moins|sur\s+(?:une|la)\s+case)/.test(
+            normCur
+          );
+        const isTrailingCondition =
+          /^(?:sauf|hormis|excepte|a\s+moins|si\b|s'|quand\b|lorsque\b)/.test(normNext);
+        const insideParens =
+          (current.match(/\(/g)?.length || 0) > (current.match(/\)/g)?.length || 0);
         if (
+          !insideParens &&
           !isLeadingCondition &&
+          !isTrailingCondition &&
           verbDetector.test(normCur) &&
-          verbDetector.test(normalizeFr(nextSeg))
+          verbDetector.test(normNext)
         ) {
           out.push(current.trim());
           current = nextSeg;
         } else {
-          current = `${current} ${nextSeg}`;
+          current = `${current}${sep}${nextSeg}`;
         }
       }
       if (current.trim()) out.push(current.trim());
@@ -562,7 +798,7 @@ function extractNounException(clean: string): {
 } {
   // Match embedded or trailing "sauf/hormis/excepte/a part X" when X is NOT "si ..." / "s'..."
   const re =
-    /(?:,\s*)?\b(?:sauf|hormis|excepte|a\s+part|a\s+l'exception\s+(?:de|du|des))\s+(?!si\b|s')([^,;.]+?)(?=\s*(?:,|\b(?:n'a|n'ont|a\s+le|ont\s+le|ne\s+peu|peut|peuvent|est|sont|ont)\b|$))/;
+    /(?:,\s*)?\b(?:sauf|hormis|excepte|a\s+part|a\s+l'exception\s+(?:de|du|des))\s+(?!si\b|s'|quand\b|lorsque\b)([^,;.]+?)(?=\s*(?:,|\b(?:n'a|n'ont|a\s+le|ont\s+le|ne\s+peu|peut|peuvent|est|sont|ont)\b|$))/;
   const m = clean.match(re);
   if (!m || m.index === undefined) {
     return { mainClause: clean, exceptionText: '' };
@@ -576,7 +812,7 @@ function extractNounException(clean: string): {
 function hasProhibitivePolarity(clean: string): boolean {
   const hasNegSubject = /\b(?:aucune?s?|nul(?:le)?s?|personne|pas\s+une?)\b/.test(clean);
   const hasNegVerb =
-    /\b(?:ne\s+(?:peut|peuvent|doit|doivent|sait|savent|mange|mangent|capture|capturent|prend|prennent|va|vont|bouge|bougent|recule|reculent)\s+(?:pas|jamais|plus|aucunement)|n'(?:a|ont)\s+(?:pas|jamais|aucun)\b|interdit|interdiction|prohibe|defense\s+de|impossible\s+de|pas\s+le\s+droit|pas\s+de\s+recul|sans\s+(?:pouvoir|reculer))\b/.test(
+    /\b(?:ne\s+(?:peut|peuvent|doit|doivent|sait|savent|mange|mangent|bouffe|bouffent|capture|capturent|prend|prennent|va|vont|bouge|bougent|recule|reculent|saute|sautent)\s+(?:pas|jamais|plus|aucunement)|n'(?:a|ont)\s+(?:pas|jamais|aucun)\b|interdit|interdiction|prohibe|defense\s+de|impossible\s+de|pas\s+le\s+droit|pas\s+de\s+recul|sans\s+(?:pouvoir|reculer)|immobiles?|ne\s+(?:bouge|bougent)\s+(?:pas|jamais|plus)|invulnerables?|immunises?|incapturables?|protege(?:e|s|es)?)\b/.test(
       clean
     );
   return hasNegSubject || hasNegVerb;
@@ -601,21 +837,41 @@ export function compileVariantRules(
   const noBackwardPieces = new Set<string>(rc.noBackwardPieces || []);
   const noBackwardExemptPieces = new Set<string>();
   let noBackwardExceptSpecial = Boolean(rc.noBackwardExceptSpecial);
+  let noBackwardCaptureAll = false;
+  const noBackwardCapturePieces = new Set<string>();
   let allowPawnBackward = false;
+  const allowPawnBackwardSides = new Set<PlayerSide>();
   let pawnCaptureForward = false;
+  let berolinaPawns = false;
+  let alwaysPawnDoubleStep = false;
+  let pawnInitialSteps = 2;
   let allCanJump = false;
   const canJumpPieces = new Set<string>();
+  const forbidJumpPieces = new Set<string>();
+  const immobilePieces = new Set<string>();
   const forbidDiagonalPieces = new Set<string>();
   const forbidOrthogonalPieces = new Set<string>();
   const grantPieceMoves: Record<string, string[]> = {};
+  const replacePieceMoves: Record<string, string[]> = {};
+  const specialGrantPieceMoves: Record<string, string[]> = {};
   const pieceMaxSteps: Record<string, number> = {};
   const noSidewaysPieces = new Set<string>(rc.noSidewaysPieces || []);
   const strictlyForwardPieces = new Set<string>(rc.strictlyForwardPieces || []);
+  const onlyLightSquarePieces = new Set<string>();
+  const onlyDarkSquarePieces = new Set<string>();
+  const forbidLightSquarePieces = new Set<string>();
+  const forbidDarkSquarePieces = new Set<string>();
   let mandatoryCapture = Boolean(rc.mandatoryCapture);
   let allowFriendlyCapture = false;
   let noCaptureBeforeTurn = 0;
   let extraActionOnCapture = false;
   const promoteOnCapturePieces = new Set<string>();
+  let promoteOnCaptureTarget = 'builtin:Q';
+  let specialPromoteTarget = 'builtin:Q';
+  let kamikazeOnCapture = false;
+  let atomicCapture = false;
+  let protectedByAllyUncapturable = false;
+  let captureValueRule: CompiledVariantRules['captureValueRule'] = 'none';
   let actionsPerTurnOverride = 0;
   let captureTargetOverride = 0;
   let disableCastling = Boolean(rc.disableCastling);
@@ -629,13 +885,37 @@ export function compileVariantRules(
   const forbiddenSpecialPieces = new Set<string>(rc.forbiddenSpecialPieces || []);
   const onlySpecialPieces = new Set<string>(rc.onlySpecialPieces || []);
   let maxStepsPerMove = rc.maxStepsPerMove || 0;
+  let wrapHorizontal = false;
   const noCapturePieces = new Set<string>();
   const captureRestrictions: VariantCaptureRestriction[] = [...(rc.captureRestrictions || [])];
 
   let checksTarget = 0;
   let reverseWin = false;
-  const reachOppositeRankPieces = new Set<string>();
+  let stalemateWins = false;
+  let reachOppositeRankPieces = new Set<string>();
   const specialWinPieces = new Set<string>();
+  let textSpecialEffectOverride: SpecialCellEffectType = 'none';
+  let rawTeamGroups: PlayerSide[][] = [];
+  let teamSharedElimination = Boolean(rc.teamSharedElimination);
+  let allowTeammateCapture = false;
+
+  if (rc.teamAssignments) {
+    const byNum = new Map<number, PlayerSide[]>();
+    for (const [sideKey, num] of Object.entries(rc.teamAssignments)) {
+      if (
+        VALID_PLAYER_SIDES.has(sideKey as PlayerSide) &&
+        typeof num === 'number' &&
+        num > 0
+      ) {
+        const list = byNum.get(num) || [];
+        list.push(sideKey as PlayerSide);
+        byNum.set(num, list);
+      }
+    }
+    for (const grp of byNum.values()) {
+      if (grp.length > 0) rawTeamGroups.push(grp);
+    }
+  }
 
   const activeRules: DetectedRuleBadge[] = [];
   const unrecognizedSentences: string[] = [];
@@ -644,10 +924,16 @@ export function compileVariantRules(
     attacker: string,
     target: string,
     condition: CaptureRestrictionCondition,
-    exemptAttackers?: string[]
+    exemptAttackers?: string[],
+    exemptTargets?: string[]
   ) => {
     const exists = captureRestrictions.some(
-      (r) => r.attacker === attacker && r.target === target && r.condition === condition
+      (r) =>
+        r.attacker === attacker &&
+        r.target === target &&
+        r.condition === condition &&
+        JSON.stringify(r.exemptAttackers || []) === JSON.stringify(exemptAttackers || []) &&
+        JSON.stringify(r.exemptTargets || []) === JSON.stringify(exemptTargets || [])
     );
     if (!exists) {
       captureRestrictions.push({
@@ -656,6 +942,7 @@ export function compileVariantRules(
         target,
         condition,
         exemptAttackers,
+        exemptTargets,
       });
     }
   };
@@ -756,6 +1043,9 @@ export function compileVariantRules(
       : []),
   ];
 
+  const captureVerbPattern =
+    /\b(?:manger|mangent|bouffer|bouffent|capturer|capturent|prendre|prennent|eliminer|eliminent|tuer|tuent|detruire|detruisent|ecraser|ecrasent)\b/;
+
   for (const { raw: rawSentence, fromRules } of combinedClauses) {
     const clean = normalizeFr(rawSentence);
     if (!clean || isStandardBoilerplate(clean)) continue;
@@ -763,19 +1053,47 @@ export function compileVariantRules(
     let sentenceMatched = false;
     const { mainClause, exceptionText } = extractNounException(clean);
     const isProhibitive = hasProhibitivePolarity(mainClause);
-    const isExclusiveStart = /^\s*(?:seul(?:e|s|es)?|uniquement|seulement)\b/.test(mainClause);
+    const isExclusiveStart =
+      /^\s*(?:seul(?:e|s|es)?|uniquement|seulement|il\s+n'y\s+a\s+que)\b/.test(mainClause);
 
-    // 1. Backward restriction OR permission (handles "ne peuvent pas reculer", "aucune pièce, sauf X, a le droit de reculer", "les pions peuvent reculer")
-    if (
-      /\b(?:reculer|recule|recul|en\s+arriere|vers\s+l'arriere|marche\s+arriere)\b/.test(mainClause) ||
+    const hasBackwardKeyword =
+      /\b(?:reculer|recule|reculent|reculant|reculons|recul|en\s+arriere|vers\s+l'arriere|marche\s+arriere)\b/.test(
+        mainClause
+      ) ||
       /(?:ne\s+(?:peut|peuvent)\s+qu'avancer|avancent?\s+uniquement|uniquement\s+vers\s+l'avant|seulement\s+vers\s+l'avant)/.test(
         mainClause
-      )
-    ) {
+      );
+    const hasCaptureVerbInMain = captureVerbPattern.test(mainClause);
+
+    // 1. Backward restriction OR backward-capture-only restriction OR permission
+    if (hasBackwardKeyword && hasCaptureVerbInMain && isProhibitive) {
+      sentenceMatched = true;
+      const subjectPart = mainClause.split(captureVerbPattern)[0];
+      const refs = extractPieceRefs(subjectPart, keywordMap);
+      if (refs.length === 0 || refs.includes('all')) {
+        noBackwardCaptureAll = true;
+        activeRules.push({
+          label: 'Aucune pièce ne peut capturer en reculant',
+          source: 'text',
+          category: 'capture',
+        });
+      } else {
+        for (const r of refs) {
+          noBackwardCapturePieces.add(r);
+          activeRules.push({
+            label: `${getPieceFilterLabel(r, allCustomPieces)} : interdit de capturer en reculant`,
+            source: 'text',
+            category: 'capture',
+          });
+        }
+      }
+    } else if (hasBackwardKeyword) {
       sentenceMatched = true;
       const exHasSpecial = /case\s+speciale/.test(exceptionText);
       const exRefs = exceptionText && !exHasSpecial ? extractPieceRefs(exceptionText, keywordMap) : [];
-      if (exHasSpecial) noBackwardExceptSpecial = true;
+      if (exHasSpecial || /\bsi[^.]*case\s+speciale/.test(clean)) {
+        noBackwardExceptSpecial = true;
+      }
       for (const er of exRefs) noBackwardExemptPieces.add(er);
 
       if (isExclusiveStart) {
@@ -812,11 +1130,12 @@ export function compileVariantRules(
               : '';
           if (!rc.noBackwardAll) {
             activeRules.push({
-              label: exHasSpecial
-                ? 'Aucune pièce ne peut reculer (sauf sur case spéciale ✦)'
-                : exRefs.length > 0
-                  ? `Aucune pièce ne peut reculer (sauf ${exRefs.map((id) => getPieceFilterLabel(id, allCustomPieces)).join(', ')})`
-                  : `Aucune pièce ne peut reculer${unknownExNote}`,
+              label:
+                exHasSpecial || noBackwardExceptSpecial
+                  ? 'Aucune pièce ne peut reculer (sauf sur case spéciale ✦)'
+                  : exRefs.length > 0
+                    ? `Aucune pièce ne peut reculer (sauf ${exRefs.map((id) => getPieceFilterLabel(id, allCustomPieces)).join(', ')})`
+                    : `Aucune pièce ne peut reculer${unknownExNote}`,
               source: 'text',
               category: 'movement',
             });
@@ -835,22 +1154,52 @@ export function compileVariantRules(
             });
           }
         }
+      } else if (/case\s+speciale/.test(clean) && noBackwardAll) {
+        noBackwardExceptSpecial = true;
+        activeRules.push({
+          label: 'Recul autorisé depuis/vers une case spéciale ✦',
+          source: 'text',
+          category: 'special',
+        });
       } else {
-        // Permissive backward rule (e.g., "les pions peuvent reculer")
         const refs = extractPieceRefs(mainClause, keywordMap);
-        if (refs.includes('builtin:P') || refs.includes('all')) {
-          allowPawnBackward = true;
-          activeRules.push({
-            label: 'Les pions ont le droit de reculer',
-            source: 'text',
-            category: 'movement',
-          });
+        for (const r of refs) {
+          const { base, side } = parsePieceFilter(r);
+          if (base === 'builtin:P' || base === 'all') {
+            if (side) {
+              allowPawnBackwardSides.add(side);
+              activeRules.push({
+                label: `Les pions (${SIDE_NOUNS_PLURAL[side]}) ont le droit de reculer`,
+                source: 'text',
+                category: 'movement',
+              });
+            } else {
+              allowPawnBackward = true;
+              activeRules.push({
+                label: 'Les pions ont le droit de reculer',
+                source: 'text',
+                category: 'movement',
+              });
+            }
+          }
         }
       }
     }
 
-    // 1b. Pawns capture forward
+    // 1b. Pawn special rules (forward capture, Berolina, always double step, triple step)
     if (
+      /\bpions?\b/.test(clean) &&
+      (/\b(?:avancent?|marchent?|se\s+deplacent?)\s+en\s+diagonale\b/.test(clean) ||
+        /\bberolina\b/.test(clean))
+    ) {
+      sentenceMatched = true;
+      berolinaPawns = true;
+      activeRules.push({
+        label: 'Pions Berolina (avancent en diagonale, capturent tout droit)',
+        source: 'text',
+        category: 'movement',
+      });
+    } else if (
       /\bpions?\b/.test(mainClause) &&
       /\b(?:mangent?|capturent?|prennent?)\b/.test(mainClause) &&
       /\b(?:tout\s+droit|devant|en\s+avancant|comme\s+ils\s+avancent)\b/.test(mainClause)
@@ -864,7 +1213,53 @@ export function compileVariantRules(
       });
     }
 
-    // 2. Sideways / diagonal / orthogonal restrictions
+    if (
+      /\bpions?\b/.test(clean) &&
+      (/\b(?:2|deux)\s+cases\s+(?:a\s+tout\s+moment|tout\s+le\s+temps|toujours|a\s+chaque\s+coup)\b/.test(clean) ||
+        /\btoujours\s+(?:avancer|bouger)\s+de\s+(?:2|deux)\s+cases\b/.test(clean))
+    ) {
+      sentenceMatched = true;
+      alwaysPawnDoubleStep = true;
+      activeRules.push({
+        label: 'Les pions peuvent avancer de 2 cases à tout moment',
+        source: 'text',
+        category: 'movement',
+      });
+    }
+
+    const pawnTripleMatch = clean.match(
+      /\bpions?\b[^.]*(?:avancer|bouger|pas)\s+(?:de\s+)?(3|4|trois|quatre)\s+cases?\s+(?:au\s+debut|au\s+premier\s+coup|initialement)/
+    );
+    if (pawnTripleMatch || /\btriple\s+pas\b/.test(clean)) {
+      const n = pawnTripleMatch ? parseFrenchNumber(pawnTripleMatch[1]) || 3 : 3;
+      sentenceMatched = true;
+      pawnInitialSteps = Math.max(pawnInitialSteps, Math.min(5, n));
+      activeRules.push({
+        label: `Les pions peuvent avancer jusqu’à ${pawnInitialSteps} cases au premier coup`,
+        source: 'text',
+        category: 'movement',
+      });
+    }
+
+    // 2. Immobility, sideways, diagonal, orthogonal, jump bans & permissions
+    if (
+      /\b(?:immobiles?|ne\s+(?:peut|peuvent)\s+(?:pas|jamais)\s+(?:bouger|se\s+deplacer)|aucun\s+deplacement)\b/.test(
+        mainClause
+      )
+    ) {
+      sentenceMatched = true;
+      const refs = extractPieceRefs(mainClause, keywordMap);
+      const targets = refs.length > 0 ? refs : ['all'];
+      for (const t of targets) {
+        immobilePieces.add(t);
+        activeRules.push({
+          label: `${getPieceFilterLabel(t, allCustomPieces)} : immobile (ne peut pas bouger)`,
+          source: 'text',
+          category: 'movement',
+        });
+      }
+    }
+
     if (
       /(?:pas\s+de\s+deplacement\s+lateral|ne\s+(?:peut|peuvent)\s+pas\s+(?:aller|bouger|se\s+deplacer)\s+(?:sur\s+les\s+cotes|lateralement|horizontalement)|strictement\s+vers\s+l'avant)/.test(
         mainClause
@@ -904,7 +1299,7 @@ export function compileVariantRules(
 
     if (
       isProhibitive &&
-      /\b(?:en\s+ligne\s+droite|orthogonal(?:ement)?)\b/.test(mainClause) &&
+      /\b(?:en\s+ligne\s+droite|orthogonal(?:ement)?|tout\s+droit)\b/.test(mainClause) &&
       !/\b(?:manger|capturer|prendre)\b/.test(mainClause)
     ) {
       sentenceMatched = true;
@@ -920,56 +1315,159 @@ export function compileVariantRules(
       }
     }
 
-    // 2b. Jumping permission ("toutes les pieces peuvent sauter", "les tours peuvent sauter")
+    // 2b. Jumping permission OR ban
     if (
-      !isProhibitive &&
-      /\b(?:peut|peuvent|a\s+le\s+droit\s+de|ont\s+le\s+droit\s+de)\s+sauter\b/.test(mainClause)
+      /\b(?:sauter|passer\s+par[- ]dessus|traverser\s+les\s+pieces)\b/.test(mainClause)
     ) {
       sentenceMatched = true;
       const refs = extractPieceRefs(mainClause, keywordMap);
-      if (refs.length === 0 || refs.includes('all')) {
-        allCanJump = true;
-        activeRules.push({
-          label: 'Toutes les pièces peuvent sauter par-dessus les autres',
-          source: 'text',
-          category: 'movement',
-        });
-      } else {
-        for (const r of refs) {
-          canJumpPieces.add(r);
+      if (isProhibitive) {
+        const targets = refs.length > 0 ? refs : ['all'];
+        for (const t of targets) {
+          forbidJumpPieces.add(t);
           activeRules.push({
-            label: `${getPieceFilterLabel(r, allCustomPieces)} peut sauter par-dessus les pièces`,
+            label: `${getPieceFilterLabel(t, allCustomPieces)} : interdit de sauter par-dessus les pièces`,
             source: 'text',
             category: 'movement',
           });
         }
+      } else if (
+        /\b(?:peut|peuvent|a\s+le\s+droit|ont\s+le\s+droit|saute|sautent|traverse|traversent)\b/.test(
+          mainClause
+        )
+      ) {
+        if (refs.length === 0 || refs.includes('all')) {
+          allCanJump = true;
+          activeRules.push({
+            label: 'Toutes les pièces peuvent sauter par-dessus les autres',
+            source: 'text',
+            category: 'movement',
+          });
+        } else {
+          for (const r of refs) {
+            canJumpPieces.add(r);
+            activeRules.push({
+              label: `${getPieceFilterLabel(r, allCustomPieces)} peut sauter par-dessus les pièces`,
+              source: 'text',
+              category: 'movement',
+            });
+          }
+        }
       }
     }
 
-    // 2c. Piece movement mimicry ("[A] se deplace aussi comme [B]")
+    // 2c. Piece movement mimicry OR replacement OR special-square-only mimicry
     const mimicMatch = mainClause.match(
-      /^(.*?)\b(?:se\s+deplace(?:nt)?|bouge(?:nt)?|a\s+les\s+deplacements?|ont\s+les\s+deplacements?)\s+(?:aussi\s+)?(?:comme|d'un|d'une|de\s+la|du)\s+(.+)$/
+      /^(.*?)\b(?:se\s+deplace(?:nt)?|bouge(?:nt)?|marche(?:nt)?|a\s+les\s+deplacements?|ont\s+les\s+deplacements?|a\s+le\s+mouvement|ont\s+le\s+mouvement|peut\s+bouger|peuvent\s+bouger)\s+(?:(aussi|uniquement|seulement)\s+)?(?:comme|a\s+la\s+facon\s+d'un|a\s+la\s+place\s+comme|d'un|d'une|de\s+la|du|des)\s+(.+)$/
     );
     if (mimicMatch) {
-      const subjRefs = extractPieceRefs(mimicMatch[1], keywordMap);
-      const templateRefs = extractPieceRefs(mimicMatch[2], keywordMap);
+      const leftTxt = mimicMatch[1];
+      const modeWord = mimicMatch[2] || '';
+      const rightTxt = mimicMatch[3];
+      const onSpecialCond =
+        /\bsur\s+(?:une|la|les)\s+cases?\s+speciales?\b/.test(clean) && !mimicMatch[0].includes('sauf');
+      const subjRefs = extractPieceRefs(leftTxt, keywordMap);
+      const templateRefs = extractPieceRefs(rightTxt, keywordMap);
       if (subjRefs.length > 0 && templateRefs.length > 0) {
         sentenceMatched = true;
+        const isReplacement =
+          modeWord === 'uniquement' ||
+          modeWord === 'seulement' ||
+          /\b(?:a\s+la\s+place|au\s+lieu)\b/.test(clean);
         for (const s of subjRefs) {
-          if (!grantPieceMoves[s]) grantPieceMoves[s] = [];
+          const targetMap = onSpecialCond
+            ? specialGrantPieceMoves
+            : isReplacement
+              ? replacePieceMoves
+              : grantPieceMoves;
+          if (!targetMap[s]) targetMap[s] = [];
           for (const t of templateRefs) {
-            if (!grantPieceMoves[s].includes(t)) grantPieceMoves[s].push(t);
+            if (!targetMap[s].includes(t)) targetMap[s].push(t);
           }
           activeRules.push({
-            label: `${getPieceFilterLabel(s, allCustomPieces)} bouge comme : ${templateRefs.map((t) => getPieceFilterLabel(t, allCustomPieces)).join(', ')}`,
+            label: onSpecialCond
+              ? `Sur case spéciale ✦, ${getPieceFilterLabel(s, allCustomPieces)} bouge aussi comme : ${templateRefs.map((t) => getPieceFilterLabel(t, allCustomPieces)).join(', ')}`
+              : isReplacement
+                ? `${getPieceFilterLabel(s, allCustomPieces)} bouge uniquement comme : ${templateRefs.map((t) => getPieceFilterLabel(t, allCustomPieces)).join(', ')}`
+                : `${getPieceFilterLabel(s, allCustomPieces)} bouge aussi comme : ${templateRefs.map((t) => getPieceFilterLabel(t, allCustomPieces)).join(', ')}`,
             source: 'text',
-            category: 'movement',
+            category: onSpecialCond ? 'special' : 'movement',
           });
         }
       }
     }
 
-    // 3. Special combat rules: friendly capture, turn-1 capture ban, bonus action on capture, promote on capture
+    // 2d. Square color restrictions (cases blanches / cases noires)
+    if (
+      /\bcases?\s+(?:blanches?|claires?|noires?|foncees?)\b/.test(mainClause) &&
+      !/\b(?:manger|capturer|prendre)\b/.test(mainClause)
+    ) {
+      const mentionsLight = /\bcases?\s+(?:blanches?|claires?)\b/.test(mainClause);
+      const mentionsDark = /\bcases?\s+(?:noires?|foncees?)\b/.test(mainClause);
+      const isOnly = /\b(?:que\s+sur|uniquement\s+sur|seulement\s+sur)\b/.test(mainClause);
+      const refs = extractPieceRefs(
+        mainClause.split(/\b(?:ne\s+(?:peut|peuvent)|peut|peuvent|vont|va|interdit)\b/)[0],
+        keywordMap
+      );
+      const targets = refs.length > 0 ? refs : ['all'];
+
+      if (mentionsLight && !mentionsDark) {
+        sentenceMatched = true;
+        for (const t of targets) {
+          if (isOnly) {
+            onlyLightSquarePieces.add(t);
+            activeRules.push({
+              label: `${getPieceFilterLabel(t, allCustomPieces)} : uniquement sur cases blanches`,
+              source: 'text',
+              category: 'movement',
+            });
+          } else if (isProhibitive) {
+            forbidLightSquarePieces.add(t);
+            activeRules.push({
+              label: `${getPieceFilterLabel(t, allCustomPieces)} : interdit sur cases blanches`,
+              source: 'text',
+              category: 'movement',
+            });
+          }
+        }
+      } else if (mentionsDark && !mentionsLight) {
+        sentenceMatched = true;
+        for (const t of targets) {
+          if (isOnly) {
+            onlyDarkSquarePieces.add(t);
+            activeRules.push({
+              label: `${getPieceFilterLabel(t, allCustomPieces)} : uniquement sur cases noires`,
+              source: 'text',
+              category: 'movement',
+            });
+          } else if (isProhibitive) {
+            forbidDarkSquarePieces.add(t);
+            activeRules.push({
+              label: `${getPieceFilterLabel(t, allCustomPieces)} : interdit sur cases noires`,
+              source: 'text',
+              category: 'movement',
+            });
+          }
+        }
+      }
+    }
+
+    // 2e. Cylindrical / wrap-around board
+    if (
+      /\b(?:(?:plateau|echiquier)\s+(?:est\s+|devient\s+)?cylindrique|bords?\s+(?:gauche\s+et\s+droit\s+|lateraux\s+)?(?:se\s+rejoignent|communiquent|(?:sont\s+)?connectes)|traverser\s+les\s+bords|passer\s+d'un\s+bord\s+a\s+l'autre)\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      wrapHorizontal = true;
+      activeRules.push({
+        label: 'Plateau cylindrique (les bords gauche et droit communiquent)',
+        source: 'text',
+        category: 'movement',
+      });
+    }
+
+    // 3. Special combat rules: friendly capture, turn-N capture ban, bonus action, promote on capture, kamikaze, atomic, defended pieces, hierarchy
     if (
       !isProhibitive &&
       /\b(?:capturer|manger|prendre)\s+(?:ses|vos|leurs)\s+propres\s+pieces\b|\bcapture\s+alliee\b/.test(
@@ -998,7 +1496,7 @@ export function compileVariantRules(
       });
     } else {
       const beforeTurnCap = mainClause.match(
-        /\b(?:pas\s+de|aucune?)\s+(?:capture|prise)\s+avant\s+le\s+(\d+|deux|trois|quatre|cinq)e?\s+tour\b/
+        /\b(?:pas\s+de|aucune?)\s+(?:capture|prise)\s+(?:avant\s+le|pendant\s+les?)\s+(\d+|deux|trois|quatre|cinq)e?\s+tours?\b/
       );
       if (beforeTurnCap) {
         const n = parseFrenchNumber(beforeTurnCap[1]);
@@ -1015,7 +1513,7 @@ export function compileVariantRules(
     }
 
     if (
-      /\b(?:rejoue(?:r)?\s+apres\s+une\s+capture|apres\s+une\s+capture[^.]*rejoue|capture\s+donne\s+une\s+action|capturer\s+permet\s+de\s+rejouer)\b/.test(
+      /\b(?:rejoue(?:r)?\s+apres\s+une\s+capture|apres\s+une\s+capture[^.]*rejoue|capture\s+donne\s+une\s+action|capturer\s+permet\s+de\s+rejouer|manger\s+permet\s+de\s+rejouer)\b/.test(
         mainClause
       )
     ) {
@@ -1028,45 +1526,183 @@ export function compileVariantRules(
       });
     }
 
+    const promoOnCapMatch = mainClause.match(
+      /\b(?:qui\s+(?:capture|mange)|apres\s+(?:avoir\s+)?(?:capture|mange)|quand[^.]*(?:capture|mange))[^.]*\b(?:devient|se\s+transforme\s+en)\s+(?:une?\s+)?(.+)$/
+    );
     if (
-      /\b(?:qui\s+(?:capture|mange)[^.]*devient\s+(?:une?\s+)?dame|transformation\s+en\s+dame\s+apres\s+capture)\b/.test(
-        mainClause
-      )
+      promoOnCapMatch ||
+      /\btransformation\s+en\s+\w+\s+apres\s+capture\b/.test(mainClause)
     ) {
       sentenceMatched = true;
-      const refs = extractPieceRefs(mainClause.split(/\bdevient\b/)[0], keywordMap);
-      const targets = refs.length > 0 ? refs : ['all'];
+      const beforePart = promoOnCapMatch ? mainClause.split(/\b(?:devient|se\s+transforme)\b/)[0] : mainClause;
+      const subjRefs = extractPieceRefs(beforePart, keywordMap);
+      const targetRefs = promoOnCapMatch ? extractPieceRefs(promoOnCapMatch[1], keywordMap) : ['builtin:Q'];
+      const chosenTarget =
+        targetRefs.find((t) => t !== 'all' && t !== 'custom' && t !== 'builtin') || 'builtin:Q';
+      promoteOnCaptureTarget = chosenTarget;
+      const targets = subjRefs.length > 0 ? subjRefs : ['all'];
       for (const t of targets) promoteOnCapturePieces.add(t);
       activeRules.push({
-        label: 'Transformation en Dame après une capture',
+        label: `Transformation en ${getPieceFilterLabel(chosenTarget, allCustomPieces)} après une capture`,
         source: 'text',
         category: 'capture',
       });
     }
 
-    // 3b. Piece capture prohibitions & conditional special square captures
-    const captureVerbPattern =
-      /\b(?:manger|mangent?|capturer|capturent?|prendre|prennent?|eliminer|tuer)\b/;
+    if (
+      /\b(?:echecs?\s+atomiques?|atomique|explosion\s+(?:lors|a\s+chaque|apres)\s+(?:des\s+|les\s+|une\s+)?captures?|captures?\s+explosives?|explosent?\s+(?:autour|les\s+pieces))\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      atomicCapture = true;
+      activeRules.push({
+        label: 'Échecs atomiques (chaque capture fait exploser les pièces non-pions autour)',
+        source: 'text',
+        category: 'capture',
+      });
+    } else if (
+      /\b(?:captures?\s+(?:sont\s+)?(?:kamikazes?|mutuelles?)|kamikazes?|attaquant\s+(?:est\s+(?:aussi\s+)?detruit|disparait)|detruit\s+aussi\s+l'attaquant|meurt\s+aussi\s+en\s+(?:mangeant|capturant))\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      kamikazeOnCapture = true;
+      activeRules.push({
+        label: 'Capture kamikaze (la pièce qui capture est aussi détruite)',
+        source: 'text',
+        category: 'capture',
+      });
+    }
+
+    if (
+      /\b(?:(?:pieces?|une?\s+piece)\s+(?:defendues?|protegees?|soutenues?)\s+(?:par\s+(?:une?\s+(?:autre\s+)?piece|une?\s+alliee?)\s+)?(?:ne\s+(?:peut|peuvent)\s+pas\s+etre\s+(?:mangee?s?|capturee?s?|prise?s?)|(?:est|sont)\s+incapturables?)|impossible\s+de\s+(?:manger|capturer)\s+une\s+piece\s+(?:defendue|protegee))\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      protectedByAllyUncapturable = true;
+      activeRules.push({
+        label: 'Les pièces défendues par une alliée ne peuvent pas être capturées',
+        source: 'text',
+        category: 'capture',
+      });
+    }
+
+    if (
+      /\b(?:plus\s+faibles?\s+ou\s+egales?|pas\s+(?:manger|capturer|prendre)\s+(?:une?\s+piece\s+)?plus\s+forte?|ne\s+peut\s+pas\s+(?:manger|capturer)\s+plus\s+fort)\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      captureValueRule = 'equal_or_weaker';
+      activeRules.push({
+        label: 'Capture limitée aux pièces de valeur inférieure ou égale',
+        source: 'text',
+        category: 'capture',
+      });
+    } else if (
+      /\b(?:strictement\s+plus\s+faible|que\s+des\s+pieces\s+plus\s+faibles)\b/.test(clean)
+    ) {
+      sentenceMatched = true;
+      captureValueRule = 'strictly_weaker';
+      activeRules.push({
+        label: 'Capture limitée aux pièces strictement plus faibles',
+        source: 'text',
+        category: 'capture',
+      });
+    } else if (
+      /\b(?:meme\s+type\s+(?:de\s+piece\s+)?(?:uniquement|seulement)|seules?\s+les\s+pieces\s+identiques\s+peuvent\s+se\s+(?:manger|capturer)|ne\s+(?:peut|peuvent)\s+(?:manger|capturer)\s+que\s+(?:le\s+meme\s+type|des\s+pieces\s+identiques))\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      captureValueRule = 'same_piece_only';
+      activeRules.push({
+        label: 'Seules les pièces du même type peuvent se capturer',
+        source: 'text',
+        category: 'capture',
+      });
+    } else if (
+      /\b(?:meme\s+type[^.]*ne\s+peuvent\s+pas\s+se\s+(?:manger|capturer)|interdit\s+de\s+(?:manger|capturer)\s+(?:le\s+meme\s+type|une\s+piece\s+identique))\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      captureValueRule = 'not_same_piece';
+      activeRules.push({
+        label: 'Les pièces identiques ne peuvent pas se capturer entre elles',
+        source: 'text',
+        category: 'capture',
+      });
+    }
+
+    // 3b. Piece capture prohibitions, whitelists, passive "par", & conditional special square captures
     const hasCaptureVerb = captureVerbPattern.test(clean);
-    const isPassiveCapture = /\b(?:etre\s+(?:capturee?s?|mangee?s?|prise?s?)|se\s+faire\s+(?:manger|capturer|prendre)|invulnerables?)\b/.test(
-      clean
-    );
+    const isPassiveCapture =
+      /\b(?:etre\s+(?:capturee?s?|mangee?s?|prise?s?|eliminee?s?|tuee?s?)|se\s+faire\s+(?:manger|capturer|prendre)|invulnerables?|immunise(?:e|s|es)?)\b/.test(
+        clean
+      );
 
     if (
       !sentenceMatched &&
       (hasCaptureVerb || isPassiveCapture) &&
-      (isProhibitive || isExclusiveStart || /\bque\s+(?:si|s'|quand|lorsque|sur)\b/.test(clean))
+      (isProhibitive ||
+        isExclusiveStart ||
+        /\b(?:que|uniquement|seulement|exclusivement|sauf|a\s+moins)\b/.test(clean))
     ) {
       sentenceMatched = true;
 
       if (isPassiveCapture) {
         const subjectRefs = extractPieceRefs(
-          mainClause.split(/\b(?:ne\s+(?:peut|peuvent)|est|sont|invulnerables?)\b/)[0],
+          mainClause.split(
+            /\b(?:ne\s+(?:peut|peuvent)|est|sont|invulnerables?|immunise(?:e|s|es)?)\b/
+          )[0],
           keywordMap
         );
-        const onSpecialOnly = clean.includes('case speciale') || clean.includes('cases speciales');
+        const targetList = subjectRefs.length > 0 ? subjectRefs : ['all'];
+        const onSpecialOnly =
+          clean.includes('case speciale') ||
+          clean.includes('cases speciales') ||
+          clean.includes('case *') ||
+          clean.includes('case etoile');
+
+        // Detect "par [attaquant]" or "face aux / contre [attaquant]" (strip trailing condition clause first)
+        const mainWithoutCond = mainClause.replace(
+          /\b(?:que\s+(?:si|s'|quand|lorsque)|uniquement\s+(?:si|s'|quand|lorsque|sur)|seulement\s+(?:si|s'|quand|lorsque|sur)|sauf\s+(?:si|s'|sur)|si\s+|s'il|s'elle).*$/,
+          ''
+        ).trim();
+        const byMatch = mainWithoutCond.match(/\b(?:par|face\s+(?:a|au|aux)|contre)\s+(.+)$/);
+        const byRefs = byMatch ? extractPieceRefs(byMatch[1], keywordMap) : [];
+        const isByOnly =
+          !isProhibitive && /\b(?:que\s+par|uniquement\s+par|seulement\s+par)\b/.test(mainWithoutCond);
+
+        let passiveSpecialCond: CaptureRestrictionCondition | null = null;
         if (onSpecialOnly) {
-          if (subjectRefs.length === 0 || subjectRefs.includes('all')) {
+          const condMatch = clean.match(
+            /\b(que\s+(?:si|s'|quand|lorsque|sur)|uniquement\s+(?:si|s'|quand|lorsque|sur)|seulement\s+(?:si|s'|quand|lorsque|sur)|exclusivement\s+(?:si|s'|quand|lorsque|sur)|sauf\s+(?:si|s'|sur)|a\s+moins\s+qu|si\s+|s'il|s'elle|quand\s+|lorsque\s+|hors\s+|sur\s+(?:une|des|les)\s+cases?\s+speciales?)(.*)$/
+          );
+          const condPart = condMatch ? `${condMatch[1]}${condMatch[2]}` : clean;
+          const condHasNegation = /\b(?:n'est\s+pas|ne\s+sont\s+pas|pas\s+sur|est\s+pas|sont\s+pas|sans\s+etre|hors)\b/.test(
+            condPart
+          );
+          const condIsException = /\b(?:sauf|a\s+moins)\b/.test(condPart);
+          const isExclusiveOnly =
+            !isProhibitive &&
+            /\b(?:que\s+(?:si|s'|quand|lorsque|sur)|uniquement|seulement|exclusivement)\b/.test(clean);
+          const requireOnSpecial = isExclusiveOnly
+            ? !condHasNegation
+            : condHasNegation !== condIsException;
+          const refersAttacker = /\b(?:attaquant|celui\s+qui\s+(?:attaque|capture|mange))\b/.test(condPart);
+          if (requireOnSpecial) {
+            passiveSpecialCond = refersAttacker ? 'attacker_on_special' : 'target_on_special';
+          } else {
+            passiveSpecialCond = refersAttacker ? 'attacker_not_on_special' : 'target_not_on_special';
+          }
+        }
+
+        if (passiveSpecialCond && byRefs.length === 0) {
+          if (targetList.includes('all') && passiveSpecialCond === 'target_not_on_special') {
             if (!specialProtected) {
               specialProtected = true;
               activeRules.push({
@@ -1076,22 +1712,58 @@ export function compileVariantRules(
               });
             }
           } else {
-            for (const tr of subjectRefs) {
-              addCaptureRule('all', tr, 'target_not_on_special');
+            for (const tr of targetList) {
+              addCaptureRule('all', tr, passiveSpecialCond);
               activeRules.push({
-                label: `${getPieceFilterLabel(tr, allCustomPieces)} ne peut pas être capturé sur une case spéciale ✦`,
+                label: formatCaptureRestrictionLabel(
+                  { id: 'txt', attacker: 'all', target: tr, condition: passiveSpecialCond },
+                  allCustomPieces
+                ),
                 source: 'text',
                 category: 'special',
               });
             }
           }
-        } else {
-          // Completely uncapturable piece(s) anywhere on the board!
-          const targets = subjectRefs.length > 0 ? subjectRefs : ['all'];
-          for (const tr of targets) {
-            addCaptureRule('all', tr, 'never');
+        } else if (isByOnly && byRefs.length > 0) {
+          const cond = passiveSpecialCond || 'never';
+          for (const tr of targetList) {
+            addCaptureRule('all', tr, cond, byRefs);
             activeRules.push({
-              label: `${getPieceFilterLabel(tr, allCustomPieces)} ne peut pas être capturé`,
+              label:
+                cond === 'never'
+                  ? `Seul ${byRefs.map((a) => getPieceFilterLabel(a, allCustomPieces)).join(', ')} peut capturer : ${getPieceFilterLabel(tr, allCustomPieces)}`
+                  : formatCaptureRestrictionLabel(
+                      { id: 'txt', attacker: 'all', target: tr, condition: cond, exemptAttackers: byRefs },
+                      allCustomPieces
+                    ),
+              source: 'text',
+              category: 'capture',
+            });
+          }
+        } else if (byRefs.length > 0) {
+          const cond = passiveSpecialCond || 'never';
+          for (const att of byRefs) {
+            for (const tr of targetList) {
+              addCaptureRule(att, tr, cond);
+              activeRules.push({
+                label: formatCaptureRestrictionLabel(
+                  { id: 'txt', attacker: att, target: tr, condition: cond },
+                  allCustomPieces
+                ),
+                source: 'text',
+                category: 'capture',
+              });
+            }
+          }
+        } else {
+          const exIsAttacker = exceptionText ? extractPieceRefs(exceptionText, keywordMap) : [];
+          for (const tr of targetList) {
+            addCaptureRule('all', tr, 'never', exIsAttacker.length > 0 ? exIsAttacker : undefined);
+            activeRules.push({
+              label:
+                exIsAttacker.length > 0
+                  ? `Seul ${exIsAttacker.map((a) => getPieceFilterLabel(a, allCustomPieces)).join(', ')} peut capturer : ${getPieceFilterLabel(tr, allCustomPieces)}`
+                  : `${getPieceFilterLabel(tr, allCustomPieces)} ne peut pas être capturé`,
               source: 'text',
               category: 'capture',
             });
@@ -1114,16 +1786,15 @@ export function compileVariantRules(
           }
         }
       } else {
-        // Active prohibitive or "ne ... que si" capture rule
+        // Active prohibitive, target-whitelist ("ne peut manger que les pions"), or conditional ("uniquement si sur case spéciale")
         const parts = clean.split(captureVerbPattern);
         const leftPart = parts[0] || '';
         const right = parts.slice(1).join(' ');
-        const isOnlyIfForm = !isProhibitive && /\bque\s+(?:si|s'|quand|lorsque|sur)\b/.test(clean);
 
         let targetRaw = right;
         let condRaw = '';
         const condSplit = right.match(
-          /^(.*?)\b(que\s+(?:si|s'|quand|lorsque|sur)|sauf\s+si|sauf\s+s'|sauf\b|a\s+moins\s+qu|si\s+il|si\s+elle|si\s+on|s'il|s'elle|si\s+|quand\s+|lorsque\s+|hors\s+|uniquement\s+|seulement\s+|qui\s+n'est\s+pas|qui\s+ne\s+sont\s+pas|qui\s+est|qui\s+sont)\b(.*)$/
+          /^(.*?)\b(que\s+(?:si|s'|quand|lorsque|sur)|sauf\s+si|sauf\s+s'|a\s+moins\s+qu|si\s+il|si\s+elle|si\s+on|s'il|s'elle|si\s+|quand\s+|lorsque\s+|hors\s+|uniquement\s+(?:si|s'|quand|lorsque|sur)|seulement\s+(?:si|s'|quand|lorsque|sur)|qui\s+n'est\s+pas|qui\s+ne\s+sont\s+pas|qui\s+est|qui\s+sont)\b(.*)$/
         );
         if (condSplit) {
           targetRaw = condSplit[1];
@@ -1136,77 +1807,124 @@ export function compileVariantRules(
         const targetRefs = extractPieceRefs(targetRaw, keywordMap);
         const finalTargets = targetRefs.length > 0 ? targetRefs : ['all'];
 
-        let condition: CaptureRestrictionCondition = 'never';
+        // Detect target whitelist: "Les fous ne peuvent manger que les pions" OR "Les fous mangent uniquement les pions"
+        const isTargetWhitelist =
+          !condRaw &&
+          targetRefs.length > 0 &&
+          !targetRefs.includes('all') &&
+          ((/\bne\s+(?:peut|peuvent)\s+(?:pas\s+)?/.test(leftPart) === false &&
+            /\b(?:uniquement|seulement|exclusivement)\b/.test(clean)) ||
+            (/\bne\b/.test(leftPart) && !isProhibitive && /\bque\b/.test(right)));
 
-        if (
-          condRaw &&
-          (condRaw.includes('case speciale') ||
-            condRaw.includes('cases speciales') ||
-            condRaw.includes('case *') ||
-            condRaw.includes('case etoile'))
-        ) {
-          const isNegatedRestriction =
-            isOnlyIfForm ||
-            /\b(?:sauf|a\s+moins|pas\s+sur|ne\s+sont\s+pas|n'est\s+pas|sont\s+pas|est\s+pas|sans\s+etre|hors|uniquement|seulement)\b/.test(
+        if (isTargetWhitelist) {
+          for (const att of finalAttackers) {
+            addCaptureRule(att, 'all', 'never', undefined, targetRefs);
+            activeRules.push({
+              label: `${getPieceFilterLabel(att, allCustomPieces)} ne peut capturer que : ${targetRefs.map((t) => getPieceFilterLabel(t, allCustomPieces)).join(', ')}`,
+              source: 'text',
+              category: 'capture',
+            });
+          }
+        } else {
+          let condition: CaptureRestrictionCondition = 'never';
+
+          if (
+            condRaw &&
+            (condRaw.includes('case speciale') ||
+              condRaw.includes('cases speciales') ||
+              condRaw.includes('case *') ||
+              condRaw.includes('case etoile'))
+          ) {
+            const condHasNegation = /\b(?:n'est\s+pas|ne\s+sont\s+pas|pas\s+sur|est\s+pas|sont\s+pas|sans\s+etre|hors)\b/.test(
               condRaw
             );
+            const condIsException = /\b(?:sauf|a\s+moins)\b/.test(condRaw);
+            const requireOnSpecial = isProhibitive
+              ? condHasNegation !== condIsException
+              : !condHasNegation;
 
-          const refersToEither = /\b(?:l'un\s+des\s+deux|au\s+moins\s+un|un\s+des\s+deux)\b/.test(condRaw);
-          const targetMentionedInCond =
-            /\b(?:cible|victime|celui-ci|celle-ci|qui\s+n'est\s+pas|qui\s+ne\s+sont\s+pas|qui\s+est|qui\s+sont)\b/.test(
+            const refersToEither = /\b(?:l'un\s+des\s+deux|au\s+moins\s+un|un\s+des\s+deux)\b/.test(
               condRaw
-            ) ||
-            finalTargets.some((t) => t !== 'all' && extractPieceRefs(condRaw, keywordMap).includes(t));
-          const attackerMentionedInCond =
-            /\b(?:attaquant|depuis|en\s+etant)\b/.test(condRaw) ||
-            finalAttackers.some((a) => a !== 'all' && extractPieceRefs(condRaw, keywordMap).includes(a));
-
-          if (isNegatedRestriction) {
-            if (refersToEither) condition = 'either_on_special';
-            else if (targetMentionedInCond && !attackerMentionedInCond) condition = 'target_on_special';
-            else condition = 'attacker_on_special';
-          } else {
-            if (targetMentionedInCond && !attackerMentionedInCond) condition = 'target_not_on_special';
-            else condition = 'attacker_not_on_special';
-          }
-        }
-
-        const nounExempts =
-          !condRaw && exceptionText && !/case\s+speciale/.test(exceptionText)
-            ? extractPieceRefs(exceptionText, keywordMap)
-            : [];
-
-        for (const att of finalAttackers) {
-          for (const tgt of finalTargets) {
-            if (att !== 'all' && tgt === 'all' && condition === 'never' && nounExempts.length === 0) {
-              noCapturePieces.add(att);
-              activeRules.push({
-                label: `${getPieceFilterLabel(att, allCustomPieces)} ne peut capturer aucune pièce`,
-                source: 'text',
-                category: 'capture',
-              });
-            } else {
-              addCaptureRule(
-                att,
-                tgt,
-                condition,
-                nounExempts.length > 0 ? nounExempts : undefined
+            );
+            const targetMentionedInCond =
+              /\b(?:cible|victime|celui-ci|celle-ci|qui\s+n'est\s+pas|qui\s+ne\s+sont\s+pas|qui\s+est|qui\s+sont)\b/.test(
+                condRaw
+              ) ||
+              finalTargets.some((t) => t !== 'all' && extractPieceRefs(condRaw, keywordMap).includes(t));
+            const attackerMentionedInCond =
+              /\b(?:attaquant|depuis|en\s+etant)\b/.test(condRaw) ||
+              finalAttackers.some(
+                (a) => a !== 'all' && extractPieceRefs(condRaw, keywordMap).includes(a)
               );
-              activeRules.push({
-                label: formatCaptureRestrictionLabel(
-                  { id: 'txt', attacker: att, target: tgt, condition, exemptAttackers: nounExempts },
-                  allCustomPieces
-                ),
-                source: 'text',
-                category: 'capture',
-              });
+
+            if (requireOnSpecial) {
+              if (refersToEither) condition = 'either_on_special';
+              else if (targetMentionedInCond && !attackerMentionedInCond) {
+                condition = 'target_on_special';
+              } else {
+                condition = 'attacker_on_special';
+              }
+            } else {
+              if (targetMentionedInCond && !attackerMentionedInCond) {
+                condition = 'target_not_on_special';
+              } else {
+                condition = 'attacker_not_on_special';
+              }
+            }
+          }
+
+          const nounExRefs =
+            !condRaw && exceptionText && !/case\s+speciale/.test(exceptionText)
+              ? extractPieceRefs(exceptionText, keywordMap)
+              : [];
+          const exceptionMentionsPar = /\bpar\b/.test(exceptionText);
+          const treatExceptionAsTarget =
+            nounExRefs.length > 0 &&
+            !exceptionMentionsPar &&
+            !finalAttackers.includes('all') &&
+            finalTargets.includes('all');
+
+          for (const att of finalAttackers) {
+            for (const tgt of finalTargets) {
+              if (
+                att !== 'all' &&
+                tgt === 'all' &&
+                condition === 'never' &&
+                nounExRefs.length === 0
+              ) {
+                noCapturePieces.add(att);
+                activeRules.push({
+                  label: `${getPieceFilterLabel(att, allCustomPieces)} ne peut capturer aucune pièce`,
+                  source: 'text',
+                  category: 'capture',
+                });
+              } else {
+                const exAtt = !treatExceptionAsTarget && nounExRefs.length > 0 ? nounExRefs : undefined;
+                const exTgt = treatExceptionAsTarget && nounExRefs.length > 0 ? nounExRefs : undefined;
+                addCaptureRule(att, tgt, condition, exAtt, exTgt);
+                activeRules.push({
+                  label: formatCaptureRestrictionLabel(
+                    {
+                      id: 'txt',
+                      attacker: att,
+                      target: tgt,
+                      condition,
+                      exemptAttackers: exAtt,
+                      exemptTargets: exTgt,
+                    },
+                    allCustomPieces
+                  ),
+                  source: 'text',
+                  category: 'capture',
+                });
+              }
             }
           }
         }
       }
     }
 
-    // 4. Special square safe zone / protection
+    // 4. Special square safe zone / protection & special-square dynamic effects from rules text
     if (
       clean.includes('case speciale') &&
       /(?:proteg|invulnerable|sanctuaire|refuge|ne\s+peuvent\s+pas\s+etre\s+pris|incapturable)/.test(
@@ -1222,6 +1940,42 @@ export function compileVariantRules(
           category: 'special',
         });
       }
+    }
+
+    if (
+      clean.includes('case speciale') &&
+      /\b(?:devient|se\s+transforme\s+en|promu(?:e|s)?\s+en)\b/.test(clean)
+    ) {
+      sentenceMatched = true;
+      textSpecialEffectOverride = 'promote';
+      const afterPart = clean.split(/\b(?:devient|se\s+transforme\s+en|promu(?:e|s)?\s+en)\b/)[1] || '';
+      const refs = extractPieceRefs(afterPart, keywordMap);
+      const chosen = refs.find((r) => r !== 'all' && r !== 'custom' && r !== 'builtin');
+      if (chosen) specialPromoteTarget = chosen;
+    } else if (
+      clean.includes('case speciale') &&
+      /\b(?:rejoue|action\s+bonus|\+1\s+(?:coup|action))\b/.test(clean)
+    ) {
+      sentenceMatched = true;
+      textSpecialEffectOverride = 'double_action';
+    } else if (
+      clean.includes('case speciale') &&
+      /\b(?:teleporte|portail)\b/.test(clean)
+    ) {
+      sentenceMatched = true;
+      textSpecialEffectOverride = 'teleport';
+    } else if (
+      clean.includes('case speciale') &&
+      /\b(?:gele|paralyse|bloque\s+la\s+piece)\b/.test(clean)
+    ) {
+      sentenceMatched = true;
+      textSpecialEffectOverride = 'freeze';
+    } else if (
+      clean.includes('case speciale') &&
+      /\b(?:piege|detruit|meurt)\b/.test(clean)
+    ) {
+      sentenceMatched = true;
+      textSpecialEffectOverride = 'trap';
     }
 
     // 5. Captures only on/from special squares
@@ -1246,7 +2000,7 @@ export function compileVariantRules(
         /\bseul(?:e|s|es)?\s+(.+?)\s+(?:peut|peuvent|a\s+le\s+droit|ont\s+le\s+droit)\s+(?:d'aller|d'entrer|aller|entrer|marcher|acceder|s'arreter)\s+sur\s+(?:la|les|une)\s+cases?\s+speciales?/
       );
       const forbidMatch = mainClause.match(
-        /^(.*?)\b(?:ne\s+(?:peut|peuvent)\s+(?:pas|jamais)|n'a\s+(?:pas\s+)?le\s+droit|n'ont\s+(?:pas\s+)?le\s+droit|a\s+le\s+droit|ont\s+le\s+droit|interdit\s+d'aller)\s+(?:d'aller|d'entrer|aller|entrer|marcher|acceder|s'arreter)?\s*sur\s+(?:la|les|une)\s+cases?\s+speciales?/
+        /^(.*?)\b(?:ne\s+(?:peut|peuvent)\s+(?:pas|jamais)|n'a\s+(?:pas\s+)?le\s+droit|n'ont\s+(?:pas\s+)?le\s+droit|interdit\s+d'aller)\s+(?:d'aller|d'entrer|aller|entrer|marcher|acceder|s'arreter)?\s*sur\s+(?:la|les|une)\s+cases?\s+speciales?/
       );
       if (onlyMatch) {
         const refs = extractPieceRefs(onlyMatch[1], keywordMap);
@@ -1332,7 +2086,7 @@ export function compileVariantRules(
       }
     }
     if (
-      /(?:\bpas\s+de\s+promotion|\bpromotion\s+interdite|\baucune\s+promotion|\bsans\s+promotion|\bpions?\s+ne\s+promeuvent\s+pas)/.test(
+      /(?:\bpas\s+de\s+promotion|\bpromotion\s+interdite|\baucune\s+promotion|\bsans\s+promotion|\bpions?\s+ne\s+(?:se\s+)?promeuvent\s+pas|\bpions?\s+ne\s+se\s+transforment?\s+pas)/.test(
         clean
       )
     ) {
@@ -1347,9 +2101,9 @@ export function compileVariantRules(
       }
     } else {
       const promoTargetMatch = clean.match(
-        /(?:promeu(?:t|vent)|promotion)\s+(?:uniquement\s+)?en\s+([a-z]+)/
+        /(?:promeu(?:t|vent)|promotion|se\s+transforme(?:nt)?)\s+(?:uniquement\s+)?en\s+([a-z0-9' -]+)/
       );
-      if (promoTargetMatch && !clean.includes('en dame')) {
+      if (promoTargetMatch && !clean.includes('case speciale') && !/\b(?:capture|mange)\b/.test(clean)) {
         const refs = extractPieceRefs(promoTargetMatch[1], keywordMap);
         if (refs.length > 0 && refs[0] !== 'all' && refs[0] !== 'builtin:Q') {
           sentenceMatched = true;
@@ -1363,7 +2117,7 @@ export function compileVariantRules(
       }
     }
 
-    // 9. No check / custom victory rules
+    // 9. No check / custom victory rules (1-check win, N-check win, antichess, stalemate=win, king of hill, opposite rank)
     if (
       /(?:\bpas\s+d'echec\b|\bechec\s+ignore|\bsans\s+echec\b|\broi\s+capturable\s+directement|\bpas\s+d'echec\s+et\s+mat)/.test(
         clean
@@ -1381,7 +2135,7 @@ export function compileVariantRules(
     }
 
     const checksMatch = clean.match(
-      /(?:(?:faire|donner|mettre|infliger|gagner\s+(?:en|avec|apres))\s+)?(\d+|deux|trois|quatre|cinq)\s+(?:fois\s+)?(?:en\s+)?echecs?\b/
+      /(?:(?:faire|donner|mettre|infliger|gagner\s+(?:en|avec|apres|au))\s+)?(\d+|un|une|premier|premiere|deux|trois|quatre|cinq)\s+(?:fois\s+)?(?:en\s+)?echecs?\b/
     );
     if (checksMatch) {
       const targetN = parseFrenchNumber(checksMatch[1]);
@@ -1389,11 +2143,22 @@ export function compileVariantRules(
         sentenceMatched = true;
         checksTarget = targetN;
         activeRules.push({
-          label: `Victoire après ${targetN} échecs infligés`,
+          label:
+            targetN === 1
+              ? 'Victoire au premier échec'
+              : `Victoire après ${targetN} échecs infligés`,
           source: 'text',
           category: 'victory',
         });
       }
+    } else if (/\b(?:premier\s+qui\s+fait\s+echec\s+gagne|faire\s+echec\s+(?:fait\s+)?gagne(?:r)?)\b/.test(clean)) {
+      sentenceMatched = true;
+      checksTarget = 1;
+      activeRules.push({
+        label: 'Victoire au premier échec',
+        source: 'text',
+        category: 'victory',
+      });
     }
 
     if (/(?:qui\s+perd\s+(?:toutes\s+)?ses\s+pieces\s+gagne|antichess|qui\s+perd\s+gagne)/.test(clean)) {
@@ -1408,7 +2173,23 @@ export function compileVariantRules(
     }
 
     if (
-      /(?:atteindre|amener)[^.]*(?:derniere\s+(?:ligne|rangee)|camp\s+adverse)/.test(clean)
+      /\b(?:pat\s+(?:fait\s+)?gagne(?:r)?|mettre\s+pat\s+gagne|celui\s+qui\s+est\s+pat\s+perd|pas\s+de\s+pat)\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      stalemateWins = true;
+      activeRules.push({
+        label: 'Le pat donne la victoire à celui qui bloque',
+        source: 'text',
+        category: 'victory',
+      });
+    }
+
+    if (
+      /(?:atteindre|amener|arriver\s+sur)[^.]*(?:derniere\s+(?:ligne|rangee)|camp\s+adverse|autre\s+cote)/.test(
+        clean
+      )
     ) {
       const refs = extractPieceRefs(clean, keywordMap);
       const targetRefs = refs.length > 0 ? refs : ['builtin:K'];
@@ -1424,25 +2205,29 @@ export function compileVariantRules(
     }
 
     if (
-      /(?:amener|placer|atteindre)[^.]*case\s+speciale[^.]*(?:gagne|victoire)/.test(clean) ||
-      /(?:gagne|victoire)[^.]*(?:en\s+atteignant|sur)[^.]*case\s+speciale/.test(clean)
+      /(?:amener|placer|atteindre|aller\s+sur)[^.]*case\s+speciale[^.]*(?:gagne|victoire)/.test(clean) ||
+      /(?:gagne|victoire)[^.]*(?:en\s+atteignant|sur|avec)[^.]*case\s+speciale/.test(clean) ||
+      /\broi\s+de\s+la\s+colline\b/.test(clean)
     ) {
       const refs = extractPieceRefs(clean, keywordMap);
-      if (refs.length > 0) {
-        sentenceMatched = true;
-        for (const r of refs) specialWinPieces.add(r);
-        activeRules.push({
-          label: `Victoire sur case spéciale ✦ (${refs.map((r) => getPieceFilterLabel(r, allCustomPieces)).join(', ')})`,
-          source: 'text',
-          category: 'victory',
-        });
-      }
+      const finalWinRefs = refs.length > 0 ? refs : ['builtin:K'];
+      sentenceMatched = true;
+      for (const r of finalWinRefs) specialWinPieces.add(r);
+      activeRules.push({
+        label: `Victoire sur case spéciale ✦ (${finalWinRefs.map((r) => getPieceFilterLabel(r, allCustomPieces)).join(', ')})`,
+        source: 'text',
+        category: 'victory',
+      });
     }
 
     // 10. Global OR per-piece range limit, actions per turn, capture target
-    const maxRangeMatch = mainClause.match(
-      /(?:portee\s+maximale|maximum|max|ne\s+(?:peut|peuvent)\s+(?:avancer|bouger|se\s+deplacer)\s+que\s+de)\s+(?:de\s+)?(\d+|un|une|deux|trois|quatre|cinq|six)\s+cases?/
-    );
+    const maxRangeMatch =
+      mainClause.match(
+        /(?:portee\s+(?:maximale|max)?|maximum|max|limite(?:e|s)?\s+a|ne\s+(?:peut|peuvent)\s+(?:avancer|bouger|se\s+deplacer)\s+que\s+de|pas\s+plus\s+de)\s*(?:de\s+)?(\d+|un|une|deux|trois|quatre|cinq|six|sept|huit)\s+cases?/
+      ) ||
+      mainClause.match(
+        /(?:avancer|bouger|se\s+deplacer)\s+(?:de\s+)?(\d+|un|une|deux|trois|quatre|cinq|six|sept|huit)\s+cases?\s*(?:max|maximum)/
+      );
     if (maxRangeMatch) {
       const n = parseFrenchNumber(maxRangeMatch[1]);
       if (n && n > 0) {
@@ -1473,7 +2258,7 @@ export function compileVariantRules(
     }
 
     const actionsMatch = mainClause.match(
-      /(\d+|deux|trois|quatre)\s+(?:coups|actions)\s+par\s+tour\b/
+      /(\d+|deux|trois|quatre|cinq)\s+(?:coups|actions)\s+par\s+tour\b/
     );
     if (actionsMatch) {
       const n = parseFrenchNumber(actionsMatch[1]);
@@ -1486,10 +2271,18 @@ export function compileVariantRules(
           category: 'general',
         });
       }
+    } else if (/\b(?:double\s+coup|joue(?:nt)?\s+deux\s+fois)\s+(?:par|a\s+chaque)\s+tour\b/.test(mainClause)) {
+      sentenceMatched = true;
+      actionsPerTurnOverride = 2;
+      activeRules.push({
+        label: '2 actions par tour',
+        source: 'text',
+        category: 'general',
+      });
     }
 
     const capTargetMatch = mainClause.match(
-      /(?:gagner\s+(?:avec|en\s+capturant)|capturer)\s+(\d+|deux|trois|quatre|cinq|six|sept|huit|dix)\s+pieces?/
+      /(?:gagner\s+(?:avec|en\s+capturant|en\s+mangeant)|capturer|manger)\s+(\d+|deux|trois|quatre|cinq|six|sept|huit|dix)\s+pieces?/
     );
     if (capTargetMatch) {
       const n = parseFrenchNumber(capTargetMatch[1]);
@@ -1504,6 +2297,99 @@ export function compileVariantRules(
       }
     }
 
+    // 11. Teams & alliances parsing
+    if (
+      /\b(?:si\s+un\s+(?:allie|coequipier|membre)[^.]*(?:perd|elimine|mat)|defaite\s+(?:partagee|d'equipe)|toute\s+l'equipe\s+perd|mort\s+subite\s+d'equipe)\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      teamSharedElimination = true;
+    }
+
+    if (
+      /\b(?:allies?|coequipiers?|equipiers?)\s+(?:peuvent|peut)\s+se\s+(?:capturer|manger|prendre)\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      allowTeammateCapture = true;
+    } else if (
+      /\b(?:allies?|coequipiers?|equipiers?)\s+ne\s+(?:peuvent|peut)\s+(?:pas\s+)?se\s+(?:capturer|manger|prendre)\b|\bpas\s+de\s+tir\s+allie\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+    }
+
+    if (/\b(?:chacun\s+pour\s+soi|pas\s+d'equipes?|aucune\s+equipe|sans\s+equipes?)\b/.test(clean)) {
+      sentenceMatched = true;
+      rawTeamGroups = [];
+    } else if (
+      /\b(?:equipes?|teams?|allies?|alliance|coequipiers?|font\s+equipe|en\s+equipe|jouent\s+ensemble|2\s*v\s*2|2\s+contre\s+2|3\s*v\s*3|3\s+contre\s+3|2\s*v\s*1|2\s+contre\s+1)\b/.test(
+        clean
+      ) ||
+      (/\b(?:contre|vs\.?|versus|face\s+a|opposes?\s+a)\b/.test(clean) &&
+        extractSideMentionsInOrder(clean).length >= 3)
+    ) {
+      const hasVsSplit = /\b(?:contre|vs\.?|versus|face\s+a|opposes?\s+a)\b/.test(clean);
+      const vsParts = hasVsSplit
+        ? clean.split(/\b(?:contre|vs\.?|versus|face\s+a|opposes?\s+a)\b/)
+        : [];
+      const leftSides = vsParts.length >= 2 ? extractSideMentionsInOrder(vsParts[0]) : [];
+      const rightSides =
+        vsParts.length >= 2 ? extractSideMentionsInOrder(vsParts.slice(1).join(' ')) : [];
+
+      if (
+        leftSides.length >= 1 &&
+        rightSides.length >= 1 &&
+        (leftSides.length >= 2 ||
+          rightSides.length >= 2 ||
+          /\b(?:equipe|allie|2\s*v\s*2|2\s+contre\s+2)\b/.test(clean)) &&
+        !leftSides.some((s) => rightSides.includes(s))
+      ) {
+        sentenceMatched = true;
+        rawTeamGroups.push(leftSides, rightSides);
+      } else {
+        const namedTeamChunks = clean
+          .split(/(?=\b(?:equipe|team|groupe)\s*(?:\d+|[a-z])\b)/)
+          .map((c) => c.trim())
+          .filter(Boolean);
+        let parsedAnyTeamChunk = false;
+        for (const chunk of namedTeamChunks) {
+          const sides = extractSideMentionsInOrder(chunk);
+          if (sides.length >= 2) {
+            rawTeamGroups.push(sides);
+            parsedAnyTeamChunk = true;
+          }
+        }
+        if (parsedAnyTeamChunk) {
+          sentenceMatched = true;
+        } else if (
+          /\b(?:2\s*v\s*2|2\s+contre\s+2|equipes?\s+alternees?|chacun\s+avec\s+le\s+joueur\s+en\s+face)\b/.test(
+            clean
+          )
+        ) {
+          sentenceMatched = true;
+          if ((variant.players || 2) >= 4) {
+            rawTeamGroups.push(['white', 'red'], ['black', 'blue']);
+          }
+        } else if (/\b(?:3\s*v\s*3|3\s+contre\s+3)\b/.test(clean)) {
+          sentenceMatched = true;
+          if ((variant.players || 2) >= 6) {
+            rawTeamGroups.push(['white', 'red', 'green'], ['black', 'blue', 'gold']);
+          }
+        } else if (/\b(?:2\s*v\s*1|2\s+contre\s+1)\b/.test(clean)) {
+          sentenceMatched = true;
+          if ((variant.players || 2) >= 3) {
+            rawTeamGroups.push(['white', 'red'], ['black']);
+          }
+        } else if (/\b(?:partage\s+de\s+la\s+victoire|victoire\s+(?:en|d')\s*equipe)\b/.test(clean)) {
+          sentenceMatched = true;
+        }
+      }
+    }
+
     // Ignore pure explanatory descriptions of already-configured board/pieces (like starter variants)
     const isBoardOrPieceNote =
       /\b(?:teleporte|bouclier|case\s+centrale|coins?\s+sont\s+supprimes|piliers?\s+bloquent|promeuvent\s+en\s+dame|1\s+ou\s+2\s+cases|echecs?\s+et\s+mat)\b/.test(
@@ -1515,12 +2401,15 @@ export function compileVariantRules(
     }
   }
 
-  const effectiveSpecialEffect = resolveEffectiveSpecialEffect(variant.board);
+  const boardSpecialEffect = resolveEffectiveSpecialEffect(variant.board);
+  const effectiveSpecialEffect: SpecialCellEffectType =
+    boardSpecialEffect !== 'none' ? boardSpecialEffect : textSpecialEffectOverride;
+
   if ((variant.board.special?.length || 0) > 0 && effectiveSpecialEffect !== 'none') {
     const effLabels: Record<SpecialCellEffectType, string> = {
       none: '',
       teleport: 'Cases spéciales ✦ : Téléportation',
-      promote: 'Cases spéciales ✦ : Promotion en Dame',
+      promote: `Cases spéciales ✦ : Promotion en ${getPieceFilterLabel(specialPromoteTarget, allCustomPieces)}`,
       shield: 'Cases spéciales ✦ : Bouclier (+1 défense)',
       double_action: 'Cases spéciales ✦ : +1 action bonus',
       freeze: 'Cases spéciales ✦ : Gèle la pièce 1 tour',
@@ -1530,7 +2419,7 @@ export function compileVariantRules(
     if (effLabels[effectiveSpecialEffect]) {
       activeRules.push({
         label: effLabels[effectiveSpecialEffect],
-        source: 'board',
+        source: boardSpecialEffect !== 'none' ? 'board' : 'text',
         category: 'special',
       });
     }
@@ -1545,24 +2434,95 @@ export function compileVariantRules(
     });
   }
 
+  // Normalize team groups against active sides
+  const defaultPool: PlayerSide[] = (['white', 'black', 'red', 'blue', 'green', 'gold'] as PlayerSide[]).slice(
+    0,
+    Math.max(2, Math.min(6, variant.players || 2))
+  );
+  const activePool: PlayerSide[] = [...defaultPool];
+  for (const s of turnOrderParsed.sides) {
+    if (!activePool.includes(s)) activePool.push(s);
+  }
+  const normalizedTeams: PlayerSide[][] = [];
+  const usedInTeams = new Set<PlayerSide>();
+  for (const grp of rawTeamGroups) {
+    const cleanGrp: PlayerSide[] = [];
+    for (const s of grp) {
+      if (activePool.includes(s) && !usedInTeams.has(s)) {
+        usedInTeams.add(s);
+        cleanGrp.push(s);
+      }
+    }
+    if (cleanGrp.length > 0) normalizedTeams.push(cleanGrp);
+  }
+  let teams: PlayerSide[][] = [];
+  if (normalizedTeams.some((g) => g.length >= 2)) {
+    teams = [...normalizedTeams];
+    for (const s of activePool) {
+      if (!usedInTeams.has(s)) {
+        teams.push([s]);
+      }
+    }
+    activeRules.push({
+      label: `Équipes : ${teams.map((t) => formatTeamLabel(t)).join(' vs ')}`,
+      source: rc.teamAssignments ? 'structured' : 'text',
+      category: 'general',
+    });
+    if (teamSharedElimination) {
+      activeRules.push({
+        label: 'Défaite d’équipe partagée (si un allié tombe, son équipe perd)',
+        source: rc.teamSharedElimination ? 'structured' : 'text',
+        category: 'victory',
+      });
+    }
+    if (allowTeammateCapture) {
+      activeRules.push({
+        label: 'Capture entre coéquipiers autorisée',
+        source: 'text',
+        category: 'capture',
+      });
+    }
+  } else {
+    teamSharedElimination = false;
+    allowTeammateCapture = false;
+  }
+
   const hasAnyCustomEnforcement =
     noBackwardAll ||
     noBackwardPieces.size > 0 ||
+    noBackwardCaptureAll ||
+    noBackwardCapturePieces.size > 0 ||
     allowPawnBackward ||
+    allowPawnBackwardSides.size > 0 ||
     pawnCaptureForward ||
+    berolinaPawns ||
+    alwaysPawnDoubleStep ||
+    pawnInitialSteps > 2 ||
     allCanJump ||
     canJumpPieces.size > 0 ||
+    forbidJumpPieces.size > 0 ||
+    immobilePieces.size > 0 ||
     forbidDiagonalPieces.size > 0 ||
     forbidOrthogonalPieces.size > 0 ||
     Object.keys(grantPieceMoves).length > 0 ||
+    Object.keys(replacePieceMoves).length > 0 ||
+    Object.keys(specialGrantPieceMoves).length > 0 ||
     Object.keys(pieceMaxSteps).length > 0 ||
     noSidewaysPieces.size > 0 ||
     strictlyForwardPieces.size > 0 ||
+    onlyLightSquarePieces.size > 0 ||
+    onlyDarkSquarePieces.size > 0 ||
+    forbidLightSquarePieces.size > 0 ||
+    forbidDarkSquarePieces.size > 0 ||
     mandatoryCapture ||
     allowFriendlyCapture ||
     noCaptureBeforeTurn > 0 ||
     extraActionOnCapture ||
     promoteOnCapturePieces.size > 0 ||
+    kamikazeOnCapture ||
+    atomicCapture ||
+    protectedByAllyUncapturable ||
+    captureValueRule !== 'none' ||
     actionsPerTurnOverride > 0 ||
     captureTargetOverride > 0 ||
     disableCastling ||
@@ -1576,14 +2536,17 @@ export function compileVariantRules(
     forbiddenSpecialPieces.size > 0 ||
     onlySpecialPieces.size > 0 ||
     maxStepsPerMove > 0 ||
+    wrapHorizontal ||
     noCapturePieces.size > 0 ||
     captureRestrictions.length > 0 ||
     checksTarget > 0 ||
     reverseWin ||
+    stalemateWins ||
     reachOppositeRankPieces.size > 0 ||
     specialWinPieces.size > 0 ||
     effectiveSpecialEffect !== 'none' ||
     turnOrderParsed.isCustom ||
+    teams.length > 0 ||
     unrecognizedSentences.length > 0;
 
   return {
@@ -1591,21 +2554,41 @@ export function compileVariantRules(
     noBackwardPieces: Array.from(noBackwardPieces),
     noBackwardExemptPieces: Array.from(noBackwardExemptPieces),
     noBackwardExceptSpecial,
+    noBackwardCaptureAll,
+    noBackwardCapturePieces: Array.from(noBackwardCapturePieces),
     allowPawnBackward,
+    allowPawnBackwardSides: Array.from(allowPawnBackwardSides),
     pawnCaptureForward,
+    berolinaPawns,
+    alwaysPawnDoubleStep,
+    pawnInitialSteps,
     allCanJump,
     canJumpPieces: Array.from(canJumpPieces),
+    forbidJumpPieces: Array.from(forbidJumpPieces),
+    immobilePieces: Array.from(immobilePieces),
     forbidDiagonalPieces: Array.from(forbidDiagonalPieces),
     forbidOrthogonalPieces: Array.from(forbidOrthogonalPieces),
     grantPieceMoves,
+    replacePieceMoves,
+    specialGrantPieceMoves,
     pieceMaxSteps,
     noSidewaysPieces: Array.from(noSidewaysPieces),
     strictlyForwardPieces: Array.from(strictlyForwardPieces),
+    onlyLightSquarePieces: Array.from(onlyLightSquarePieces),
+    onlyDarkSquarePieces: Array.from(onlyDarkSquarePieces),
+    forbidLightSquarePieces: Array.from(forbidLightSquarePieces),
+    forbidDarkSquarePieces: Array.from(forbidDarkSquarePieces),
     mandatoryCapture,
     allowFriendlyCapture,
     noCaptureBeforeTurn,
     extraActionOnCapture,
     promoteOnCapturePieces: Array.from(promoteOnCapturePieces),
+    promoteOnCaptureTarget,
+    specialPromoteTarget,
+    kamikazeOnCapture,
+    atomicCapture,
+    protectedByAllyUncapturable,
+    captureValueRule,
     actionsPerTurnOverride,
     captureTargetOverride,
     disableCastling,
@@ -1619,15 +2602,20 @@ export function compileVariantRules(
     forbiddenSpecialPieces: Array.from(forbiddenSpecialPieces),
     onlySpecialPieces: Array.from(onlySpecialPieces),
     maxStepsPerMove,
+    wrapHorizontal,
     noCapturePieces: Array.from(noCapturePieces),
     captureRestrictions,
     checksTarget,
     reverseWin,
+    stalemateWins,
     reachOppositeRankPieces: Array.from(reachOppositeRankPieces),
     specialWinPieces: Array.from(specialWinPieces),
     effectiveSpecialEffect,
     turnOrderSides: turnOrderParsed.sides,
     hasCustomTurnOrder: turnOrderParsed.isCustom,
+    teams,
+    teamSharedElimination,
+    allowTeammateCapture,
     hasAnyCustomEnforcement,
     activeRules,
     unrecognizedSentences,
@@ -1640,16 +2628,27 @@ export function formatCaptureRestrictionLabel(
 ): string {
   const att = getPieceFilterLabel(r.attacker, customPieces);
   const tgt = getPieceFilterLabel(r.target, customPieces);
-  const exemptList =
+  const exemptAttList =
     r.exemptAttackers && r.exemptAttackers.length > 0
       ? r.exemptAttackers.map((id) => getPieceFilterLabel(id, customPieces)).join(', ')
       : '';
+  const exemptTgtList =
+    r.exemptTargets && r.exemptTargets.length > 0
+      ? r.exemptTargets.map((id) => getPieceFilterLabel(id, customPieces)).join(', ')
+      : '';
 
-  if (r.attacker === 'all' && r.condition === 'never' && exemptList) {
-    return `Seul ${exemptList} peut capturer : ${tgt}`;
+  if (r.attacker === 'all' && r.condition === 'never' && exemptAttList) {
+    return `Seul ${exemptAttList} peut capturer : ${tgt}`;
+  }
+  if (r.target === 'all' && r.condition === 'never' && exemptTgtList) {
+    return `${att} ne peut capturer que : ${exemptTgtList}`;
   }
 
-  const suffix = exemptList ? ` (sauf ${exemptList})` : '';
+  const suffix = exemptAttList
+    ? ` (sauf ${exemptAttList})`
+    : exemptTgtList
+      ? ` (sauf ${exemptTgtList})`
+      : '';
   switch (r.condition) {
     case 'never':
       return `${att} ne peut jamais capturer : ${tgt}${suffix}`;
@@ -1672,7 +2671,8 @@ export function isPieceBackwardForbidden(
   from: number,
   to: number,
   board: BoardConfig,
-  customDef?: PieceDef
+  customDef?: PieceDef,
+  pieceSide?: PlayerSide
 ): boolean {
   if (customDef && (customDef.moves.forwardOnly || parsePieceTextConfig(customDef).forwardOnly)) {
     return true;
@@ -1681,29 +2681,39 @@ export function isPieceBackwardForbidden(
   if (compiled.noBackwardExceptSpecial && (specialSet.includes(from) || specialSet.includes(to))) {
     return false;
   }
-  if (compiled.noBackwardPieces.some((f) => doesPieceMatchFilter(pieceId, f))) return true;
+  if (compiled.noBackwardPieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide))) return true;
   if (
     compiled.noBackwardAll &&
-    !compiled.noBackwardExemptPieces.some((f) => doesPieceMatchFilter(pieceId, f))
+    !compiled.noBackwardExemptPieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide))
   ) {
     return true;
   }
   return false;
 }
 
+export function isPieceBackwardCaptureForbidden(
+  compiled: CompiledVariantRules,
+  pieceId: string,
+  pieceSide?: PlayerSide
+): boolean {
+  if (compiled.noBackwardCaptureAll) return true;
+  return compiled.noBackwardCapturePieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide));
+}
+
 export function isPieceSidewaysForbidden(
   compiled: CompiledVariantRules,
   pieceId: string,
-  customDef?: PieceDef
+  customDef?: PieceDef,
+  pieceSide?: PlayerSide
 ): { noSideways: boolean; strictlyForward: boolean } {
   const parsed = customDef ? parsePieceTextConfig(customDef) : null;
   const strictlyForward =
     Boolean(parsed?.strictlyForward) ||
-    compiled.strictlyForwardPieces.some((f) => doesPieceMatchFilter(pieceId, f));
+    compiled.strictlyForwardPieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide));
   const noSideways =
     strictlyForward ||
     Boolean(parsed?.noSideways) ||
-    compiled.noSidewaysPieces.some((f) => doesPieceMatchFilter(pieceId, f));
+    compiled.noSidewaysPieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide));
   return { noSideways, strictlyForward };
 }
 
@@ -1711,16 +2721,42 @@ export function isSpecialEntryAllowed(
   compiled: CompiledVariantRules,
   board: BoardConfig,
   pieceId: string,
-  to: number
+  to: number,
+  pieceSide?: PlayerSide
 ): boolean {
   if (!board.special?.includes(to)) return true;
-  if (compiled.forbiddenSpecialPieces.some((f) => doesPieceMatchFilter(pieceId, f))) {
+  if (compiled.forbiddenSpecialPieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide))) {
     return false;
   }
   if (
     compiled.onlySpecialPieces.length > 0 &&
-    !compiled.onlySpecialPieces.some((f) => doesPieceMatchFilter(pieceId, f))
+    !compiled.onlySpecialPieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide))
   ) {
+    return false;
+  }
+  return true;
+}
+
+export function isSquareColorAllowed(
+  compiled: CompiledVariantRules,
+  pieceId: string,
+  to: number,
+  cols: number,
+  pieceSide?: PlayerSide
+): boolean {
+  const r = Math.floor(to / cols);
+  const c = to % cols;
+  const isLight = (r + c) % 2 === 0;
+  if (isLight && compiled.forbidLightSquarePieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide))) {
+    return false;
+  }
+  if (!isLight && compiled.forbidDarkSquarePieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide))) {
+    return false;
+  }
+  if (!isLight && compiled.onlyLightSquarePieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide))) {
+    return false;
+  }
+  if (isLight && compiled.onlyDarkSquarePieces.some((f) => doesPieceMatchFilter(pieceId, f, pieceSide))) {
     return false;
   }
   return true;
@@ -1734,8 +2770,19 @@ export function canPieceCaptureTarget(
   victimPieceId: string,
   victimSquare: number,
   customPieces: PieceDef[] = [],
-  fullMoveNumber?: number
+  fullMoveNumber?: number,
+  options?: {
+    attackerValue?: number;
+    victimValue?: number;
+    isVictimDefended?: boolean;
+    isBackwardMove?: boolean;
+    attackerSide?: PlayerSide;
+    victimSide?: PlayerSide;
+  }
 ): { allowed: boolean; reason?: string } {
+  const attSide = options?.attackerSide;
+  const vicSide = options?.victimSide;
+
   if (
     compiled.noCaptureBeforeTurn > 0 &&
     fullMoveNumber !== undefined &&
@@ -1750,11 +2797,18 @@ export function canPieceCaptureTarget(
     };
   }
 
+  if (options?.isBackwardMove && isPieceBackwardCaptureForbidden(compiled, attackerPieceId, attSide)) {
+    return {
+      allowed: false,
+      reason: `${getPieceFilterLabel(attackerPieceId, customPieces)} ne peut pas capturer en reculant.`,
+    };
+  }
+
   const specialSquares = board.special || [];
   const isFromSpecial = specialSquares.includes(from);
   const isToSpecial = specialSquares.includes(victimSquare);
 
-  if (compiled.noCapturePieces.some((f) => doesPieceMatchFilter(attackerPieceId, f))) {
+  if (compiled.noCapturePieces.some((f) => doesPieceMatchFilter(attackerPieceId, f, attSide))) {
     return {
       allowed: false,
       reason: `${getPieceFilterLabel(attackerPieceId, customPieces)} ne peut capturer aucune pièce.`,
@@ -1775,12 +2829,60 @@ export function canPieceCaptureTarget(
     };
   }
 
+  if (compiled.protectedByAllyUncapturable && options?.isVictimDefended) {
+    return {
+      allowed: false,
+      reason: 'Pièce défendue : une pièce protégée par une alliée ne peut pas être capturée.',
+    };
+  }
+
+  if (compiled.captureValueRule === 'same_piece_only' && attackerPieceId !== victimPieceId) {
+    return {
+      allowed: false,
+      reason: 'Seules les pièces du même type peuvent se capturer.',
+    };
+  }
+  if (compiled.captureValueRule === 'not_same_piece' && attackerPieceId === victimPieceId) {
+    return {
+      allowed: false,
+      reason: 'Deux pièces identiques ne peuvent pas se capturer.',
+    };
+  }
+  if (
+    compiled.captureValueRule === 'equal_or_weaker' &&
+    options?.attackerValue !== undefined &&
+    options?.victimValue !== undefined &&
+    options.victimValue > options.attackerValue
+  ) {
+    return {
+      allowed: false,
+      reason: 'Impossible de capturer une pièce plus forte que l’attaquant.',
+    };
+  }
+  if (
+    compiled.captureValueRule === 'strictly_weaker' &&
+    options?.attackerValue !== undefined &&
+    options?.victimValue !== undefined &&
+    options.victimValue >= options.attackerValue
+  ) {
+    return {
+      allowed: false,
+      reason: 'Impossible de capturer une pièce de force supérieure ou égale.',
+    };
+  }
+
   for (const rule of compiled.captureRestrictions) {
-    if (!doesPieceMatchFilter(attackerPieceId, rule.attacker)) continue;
-    if (!doesPieceMatchFilter(victimPieceId, rule.target)) continue;
+    if (!doesPieceMatchFilter(attackerPieceId, rule.attacker, attSide)) continue;
+    if (!doesPieceMatchFilter(victimPieceId, rule.target, vicSide)) continue;
     if (
       rule.exemptAttackers &&
-      rule.exemptAttackers.some((ea) => doesPieceMatchFilter(attackerPieceId, ea))
+      rule.exemptAttackers.some((ea) => doesPieceMatchFilter(attackerPieceId, ea, attSide))
+    ) {
+      continue;
+    }
+    if (
+      rule.exemptTargets &&
+      rule.exemptTargets.some((et) => doesPieceMatchFilter(victimPieceId, et, vicSide))
     ) {
       continue;
     }

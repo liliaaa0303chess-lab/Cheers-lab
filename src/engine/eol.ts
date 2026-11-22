@@ -121,6 +121,7 @@ export interface ComputeEolInput {
   isOpponentCreator: boolean;
   movesCount: number;
   recentSamePairGames?: number;
+  modeMultiplier?: number; // 1 = en ligne, 0.5 = IA ou local face-à-face
 }
 
 export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
@@ -135,8 +136,10 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
     isOpponentCreator,
     movesCount,
     recentSamePairGames = 0,
+    modeMultiplier = 1,
   } = input;
 
+  const effectiveModeMult = modeMultiplier > 0 && modeMultiplier <= 1 ? modeMultiplier : 1;
   const controlledDiff = variant.controlledDifficulty || computeControlledDifficulty(variant);
   const diffMult = DIFFICULTY_COEFFICIENTS[controlledDiff];
   const gap = Math.abs(playerEol - opponentEol);
@@ -164,6 +167,7 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
       difficultyLabel: controlledDiff,
       difficultyMultiplier: diffMult,
       creatorMultiplier: 1,
+      modeMultiplier: effectiveModeMult,
       discoveryLossProtectionApplied: false,
       capped: false,
     };
@@ -188,6 +192,7 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
       difficultyLabel: controlledDiff,
       difficultyMultiplier: diffMult,
       creatorMultiplier: 1,
+      modeMultiplier: effectiveModeMult,
       discoveryLossProtectionApplied: false,
       capped: false,
     };
@@ -211,6 +216,13 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
       creatorMultiplier = 0.75;
     }
 
+    if (delta !== 0 && effectiveModeMult !== 1) {
+      delta =
+        delta > 0
+          ? Math.max(1, Math.round(delta * effectiveModeMult))
+          : -Math.max(1, Math.round(Math.abs(delta) * effectiveModeMult));
+    }
+
     const playerAfter = Math.max(100, playerEol + delta);
     const oppAfter = Math.max(100, opponentEol - delta);
 
@@ -231,6 +243,7 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
       difficultyLabel: controlledDiff,
       difficultyMultiplier: diffMult,
       creatorMultiplier,
+      modeMultiplier: effectiveModeMult,
       discoveryLossProtectionApplied: false,
       capped: false,
     };
@@ -253,7 +266,7 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
       gain = MAX_EOL_TRANSFER;
       capped = true;
     }
-    gain = Math.max(1, gain);
+    gain = Math.max(1, Math.round(gain * effectiveModeMult));
 
     const oppLoss = oppFam.isDiscovery ? Math.max(1, Math.round(gain * 0.8)) : gain;
     const playerAfter = playerEol + gain;
@@ -276,6 +289,7 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
       difficultyLabel: controlledDiff,
       difficultyMultiplier: diffMult,
       creatorMultiplier: creatorMult,
+      modeMultiplier: effectiveModeMult,
       discoveryLossProtectionApplied: false,
       capped,
     };
@@ -298,7 +312,7 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
     oppGain = MAX_EOL_TRANSFER;
     capped = true;
   }
-  oppGain = Math.max(1, oppGain);
+  oppGain = Math.max(1, Math.round(oppGain * effectiveModeMult));
 
   const protection = playerFam.isDiscovery;
   const playerLoss = protection ? Math.max(1, Math.round(oppGain * 0.8)) : oppGain;
@@ -322,6 +336,7 @@ export function computeEolTransfer(input: ComputeEolInput): EolBreakdown {
     difficultyLabel: controlledDiff,
     difficultyMultiplier: diffMult,
     creatorMultiplier: oppCreatorMult,
+    modeMultiplier: effectiveModeMult,
     discoveryLossProtectionApplied: protection,
     capped,
   };

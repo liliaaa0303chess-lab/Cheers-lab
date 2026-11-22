@@ -98,6 +98,7 @@ export interface VariantCaptureRestriction {
   target: PieceTargetFilter;
   condition: CaptureRestrictionCondition;
   exemptAttackers?: string[];
+  exemptTargets?: string[];
 }
 
 export interface VariantRuleConfig {
@@ -119,6 +120,8 @@ export interface VariantRuleConfig {
   onlySpecialPieces?: string[];
   maxStepsPerMove?: number;
   captureRestrictions?: VariantCaptureRestriction[];
+  teamAssignments?: Partial<Record<PlayerSide, number>>;
+  teamSharedElimination?: boolean;
 }
 
 export interface VariantVersion {
@@ -149,6 +152,7 @@ export interface Variant {
   goal: string;
   actions: number;
   duration: number; // minutes per player, 0 = unlimited
+  incrementSec?: number; // seconds added per turn
   turnOrder: string;
   rules: string;
   ruleConstraints?: VariantRuleConfig;
@@ -204,16 +208,31 @@ export interface EolBreakdown {
   difficultyLabel: VariantDifficulty;
   difficultyMultiplier: number;
   creatorMultiplier: number;
+  modeMultiplier?: number;
   discoveryLossProtectionApplied: boolean;
   capped: boolean;
+}
+
+export interface ReplayMove {
+  from: number;
+  to: number;
+  captureIndex?: number;
+  promotionPieceId?: string;
+  isCastle?: 'kingside' | 'queenside';
+  isEnPassant?: boolean;
+  isPower?: SpecialPowerType;
+  powerTarget?: number;
+  description?: string;
 }
 
 export interface GameRecord {
   id: string;
   type: 'Partie locale' | 'Partie contre IA' | 'Partie en ligne' | 'Analyse sauvegardée' | 'Variante créée';
   mode?: 'local' | 'ai' | 'online' | 'analysis';
+  competitive?: boolean;
   variantId: string | null;
   variantName: string;
+  variantSnapshot?: Variant;
   creatorName?: string;
   opponentName: string;
   opponentEol?: number;
@@ -221,6 +240,7 @@ export interface GameRecord {
   result: 'win' | 'loss' | 'draw' | 'saved';
   reason?: string;
   movesCount?: number;
+  replayMoves?: ReplayMove[];
   date: string;
   eolBreakdown?: EolBreakdown;
   userRating?: number;
@@ -266,15 +286,50 @@ export type GameMode = 'local' | 'ai' | 'online' | 'analysis';
 
 export type AiDifficultyLevel = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 
-export const AI_LEVELS: { level: AiDifficultyLevel; label: string; depth: number; stockfishSkill: number }[] = [
-  { level: 1, label: 'Très facile', depth: 1, stockfishSkill: 0 },
-  { level: 2, label: 'Facile', depth: 1, stockfishSkill: 2 },
-  { level: 3, label: 'Petit joueur', depth: 2, stockfishSkill: 4 },
-  { level: 4, label: 'Débutant', depth: 2, stockfishSkill: 6 },
-  { level: 5, label: 'Intermédiaire', depth: 2, stockfishSkill: 8 },
-  { level: 6, label: 'Confirmé', depth: 3, stockfishSkill: 11 },
-  { level: 7, label: 'Avancé', depth: 3, stockfishSkill: 14 },
-  { level: 8, label: 'Difficile', depth: 3, stockfishSkill: 16 },
-  { level: 9, label: 'Expert', depth: 4, stockfishSkill: 18 },
-  { level: 10, label: 'Maître', depth: 4, stockfishSkill: 20 },
+export const AI_LEVELS: {
+  level: AiDifficultyLevel;
+  label: string;
+  approxEol: number;
+  depth: number;
+  stockfishSkill: number;
+}[] = [
+  { level: 1, label: 'Très facile', approxEol: 250, depth: 1, stockfishSkill: 0 },
+  { level: 2, label: 'Facile', approxEol: 325, depth: 1, stockfishSkill: 2 },
+  { level: 3, label: 'Petit joueur', approxEol: 400, depth: 2, stockfishSkill: 4 },
+  { level: 4, label: 'Débutant', approxEol: 500, depth: 2, stockfishSkill: 6 },
+  { level: 5, label: 'Intermédiaire', approxEol: 650, depth: 2, stockfishSkill: 8 },
+  { level: 6, label: 'Confirmé', approxEol: 825, depth: 3, stockfishSkill: 11 },
+  { level: 7, label: 'Avancé', approxEol: 1025, depth: 3, stockfishSkill: 14 },
+  { level: 8, label: 'Difficile', approxEol: 1250, depth: 3, stockfishSkill: 16 },
+  { level: 9, label: 'Expert', approxEol: 1500, depth: 4, stockfishSkill: 18 },
+  { level: 10, label: 'Maître', approxEol: 1800, depth: 4, stockfishSkill: 20 },
 ];
+
+export function getClosestAiLevelForEol(eol: number): AiDifficultyLevel {
+  let best: AiDifficultyLevel = 3;
+  let bestDiff = Infinity;
+  for (const item of AI_LEVELS) {
+    const diff = Math.abs(item.approxEol - eol);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = item.level;
+    }
+  }
+  return best;
+}
+
+export interface OnlineHumanSeat {
+  userId: string;
+  nickname: string;
+  eol: number;
+  side: PlayerSide;
+  theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
+}
+
+export interface OnlineAiSeat {
+  side: PlayerSide;
+  level: AiDifficultyLevel;
+  approxEol: number;
+  nickname: string;
+}
+

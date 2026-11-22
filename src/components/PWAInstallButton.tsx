@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Check,
   Copy,
   Download,
   ExternalLink,
+  Info,
   Monitor,
   Share,
   Smartphone,
@@ -13,12 +15,19 @@ import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface PWAInstallButtonProps {
   compact?: boolean;
+  showInfoCorner?: boolean;
+  customLabel?: string;
 }
 
-export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({ compact = false }) => {
+export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
+  compact = false,
+  showInfoCorner = false,
+  customLabel,
+}) => {
   const { isInstallable, isInstalled, isIOS, isInIframe, directInstallUrl, install } =
     usePWAInstall();
   const [showGuide, setShowGuide] = useState(false);
+  const [showInfoModal, setShowInfoModal] = useState(false);
   const [copied, setCopied] = useState(false);
 
   if (isInstalled) {
@@ -46,36 +55,119 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({ compact = fa
     }
   };
 
-  return (
-    <>
-      <button
-        type="button"
-        onClick={handleClick}
-        className={`inline-flex items-center gap-1.5 rounded-xl font-semibold transition-colors whitespace-nowrap shrink-0 ${
-          isInstallable
-            ? 'bg-emerald-400 hover:bg-emerald-300 text-slate-950 shadow-sm'
-            : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
-        } ${compact ? 'px-2.5 py-1.5 text-xs min-h-[38px]' : 'px-4 py-2.5 text-sm min-h-[44px]'}`}
-        title={
-          isInstallable
-            ? 'Installer Chess Lab directement en 1 clic'
-            : 'Installer Chess Lab sur Android, iPhone ou ordinateur'
-        }
-      >
-        <Download className="w-3.5 h-3.5" />
-        <span>
-          {isInstallable
+  const buttonEl = (
+    <button
+      type="button"
+      onClick={handleClick}
+      className={`inline-flex items-center gap-1.5 rounded-xl font-semibold transition-colors whitespace-nowrap shrink-0 ${
+        isInstallable
+          ? 'bg-emerald-400 hover:bg-emerald-300 text-slate-950 shadow-sm'
+          : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
+      } ${compact ? 'px-2.5 py-1.5 text-xs min-h-[38px]' : 'px-4 py-2.5 text-sm min-h-[44px]'}`}
+      title={
+        isInstallable
+          ? 'Installer Chess Lab directement en 1 clic'
+          : 'Installer Chess Lab sur Android, iPhone ou ordinateur'
+      }
+    >
+      <Download className="w-3.5 h-3.5" />
+      <span>
+        {customLabel
+          ? customLabel
+          : isInstallable
             ? compact
               ? 'Installer'
               : 'Installer en 1 clic'
             : compact
               ? 'Installer'
               : 'Installer l’application'}
-        </span>
-      </button>
+      </span>
+    </button>
+  );
 
-      {showGuide && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+  return (
+    <>
+      {showInfoCorner ? (
+        <div className="relative inline-flex shrink-0">
+          {buttonEl}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowInfoModal(true);
+            }}
+            aria-label="À quoi sert d’installer l’application ?"
+            title="À quoi sert d’installer Chess Lab ?"
+            className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-slate-900 text-sky-400 hover:text-white flex items-center justify-center shadow-md transition-colors"
+          >
+            <Info className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ) : (
+        buttonEl
+      )}
+
+      {showInfoModal &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+            onClick={() => setShowInfoModal(false)}
+          >
+            <div
+              className="w-full max-w-md max-h-[85vh] overflow-y-auto rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#151c27] p-5 sm:p-6 shadow-2xl space-y-4"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                  <Info className="w-5 h-5 text-sky-400 shrink-0" />
+                  <span>À quoi sert d’installer Chess Lab ?</span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowInfoModal(false)}
+                  aria-label="Fermer"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <ul className="space-y-2.5 text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
+                <li className="flex gap-2">
+                  <span className="font-bold text-sky-400 shrink-0">•</span>
+                  <span>
+                    <strong>Icône directe sur l’écran d’accueil</strong> (Android, iPhone ou PC), comme une vraie application gratuite.
+                  </span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold text-sky-400 shrink-0">•</span>
+                  <span>
+                    <strong>Affichage en plein écran</strong> sans la barre d’adresse du navigateur, plus confortable pour jouer.
+                  </span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-bold text-sky-400 shrink-0">•</span>
+                  <span>
+                    <strong>Mode hors ligne :</strong> joue contre l’IA et modifie tes variantes locales même sans connexion internet.
+                  </span>
+                </li>
+              </ul>
+              <button
+                type="button"
+                onClick={() => setShowInfoModal(false)}
+                className="w-full py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-sm min-h-[42px]"
+              >
+                Compris
+              </button>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {showGuide &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
           <div className="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-slate-700 bg-white dark:bg-[#151c27] p-5 sm:p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">
@@ -202,8 +294,9 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({ compact = fa
               Fermer
             </button>
           </div>
-        </div>
-      )}
+        </div>,
+          document.body
+        )}
     </>
   );
 };

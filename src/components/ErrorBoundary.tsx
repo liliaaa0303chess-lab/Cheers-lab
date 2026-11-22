@@ -38,14 +38,23 @@ export class ErrorBoundary extends React.Component<
             <p className="text-xs text-slate-400 break-words max-h-28 overflow-y-auto">
               {this.state.message}
             </p>
-            <button
-              type="button"
-              onClick={() => window.location.reload()}
-              className="inline-flex items-center justify-center gap-2 w-full py-2.5 px-4 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-sm min-h-[44px]"
-            >
-              <RefreshCw className="w-4 h-4" />
-              <span>Recharger Chess Lab</span>
-            </button>
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => this.setState({ hasError: false, message: '' })}
+                className="inline-flex items-center justify-center gap-2 w-full py-2.5 px-4 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-sm min-h-[44px]"
+              >
+                <span>Reprendre sans recharger</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="inline-flex items-center justify-center gap-2 w-full py-2.5 px-4 rounded-xl border border-slate-700 hover:border-sky-400 text-slate-200 font-medium text-xs min-h-[40px]"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Recharger Chess Lab</span>
+              </button>
+            </div>
           </div>
         </div>
       );

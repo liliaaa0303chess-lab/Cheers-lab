@@ -105,8 +105,10 @@ export const VariantRulesSummary: React.FC<VariantRulesSummaryProps> = ({
             {variant.goal || victoryLabels[variant.victoryType]}
           </p>
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            Actions/tour : {variant.actions || 1} · Durée :{' '}
-            {variant.duration > 0 ? `${variant.duration} min` : 'Illimitée'}
+            Actions/tour : {variant.actions || 1} · Pendule :{' '}
+            {variant.duration > 0
+              ? `${variant.duration} min${variant.incrementSec ? ` + ${variant.incrementSec} s/coup` : ''}`
+              : 'Illimitée'}
           </p>
         </div>
 

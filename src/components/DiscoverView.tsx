@@ -12,7 +12,16 @@ import {
   X,
 } from 'lucide-react';
 import type { User } from '../firebase';
-import type { PieceDef, Profile, Variant } from '../types/chess';
+import {
+  AI_LEVELS,
+  getClosestAiLevelForEol,
+  type OnlineAiSeat,
+  type OnlineHumanSeat,
+  type PieceDef,
+  type PlayerSide,
+  type Profile,
+  type Variant,
+} from '../types/chess';
 import {
   addCommentToFirestore,
   fetchPublicVariantsFromFirestore,
@@ -27,14 +36,16 @@ import { VariantRulesSummary } from './VariantRulesSummary';
 
 interface DiscoverViewProps {
   localVariants: Variant[];
+  externalPublicVariants?: Variant[];
   profile: Profile;
   customPieces: PieceDef[];
   firebaseUser?: User | null;
-  onPlayAiVariant: (variant: Variant) => void;
+  onPlayAiVariant: (variant: Variant, competitive: boolean) => void;
   onOnlineMatched: (payload: {
     roomId: string;
     code: string;
-    yourSide: 'white' | 'black';
+    yourSide: PlayerSide;
+    competitive: boolean;
     variant: Variant;
     opponent: {
       userId: string;
@@ -42,6 +53,9 @@ interface DiscoverViewProps {
       eol: number;
       theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
     };
+    participants?: OnlineHumanSeat[];
+    aiSeats?: OnlineAiSeat[];
+    hostUserId?: string;
     ws: WebSocket;
   }) => void;
   onForkVariant: (variant: Variant) => void;
@@ -51,6 +65,7 @@ interface DiscoverViewProps {
 
 export const DiscoverView: React.FC<DiscoverViewProps> = ({
   localVariants,
+  externalPublicVariants = [],
   profile,
   customPieces,
   firebaseUser,
@@ -64,6 +79,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
   const [serverVariants, setServerVariants] = useState<Variant[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedVariant, setSelectedVariant] = useState<Variant | null>(null);
+  const [competitive, setCompetitive] = useState(true);
   const [commentText, setCommentText] = useState('');
   const [hiddenContent, setHiddenContent] = useState<{ variants: string[]; comments: string[] }>(
     () => {
@@ -116,10 +132,27 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
     onNotify('Commentaire signalé et masqué.');
   };
 
-  // Matchmaking state
+  // Matchmaking state (10s before AI fallback / multi-player AI fill)
   const [searchingOnline, setSearchingOnline] = useState(false);
-  const [countdown, setCountdown] = useState(8);
+  const [countdown, setCountdown] = useState(10);
   const wsRef = React.useRef<WebSocket | null>(null);
+  const matchedHandedOffRef = React.useRef(false);
+  const recommendedAiLevel = getClosestAiLevelForEol(profile.eol);
+  const recommendedAiMeta =
+    AI_LEVELS.find((l) => l.level === recommendedAiLevel) || AI_LEVELS[2];
+
+  useEffect(() => {
+    return () => {
+      if (!matchedHandedOffRef.current && wsRef.current) {
+        try {
+          wsRef.current.close();
+        } catch {
+          // ignore
+        }
+        wsRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -162,9 +195,12 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
     };
   }, [selectedVariant?.id]);
 
-  // Merge public server variants + public local variants (strictly NEVER private, link-only, reported, or non-tout-public)
+  // Merge public server variants + real-time external public variants + public local variants
   const publicVariants = React.useMemo(() => {
     const map = new Map<string, Variant>();
+    for (const v of externalPublicVariants) {
+      if (v.visibility === 'public') map.set(v.id, v);
+    }
     for (const v of serverVariants) {
       if (v.visibility === 'public') map.set(v.id, v);
     }
@@ -183,7 +219,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
           v.creator.toLowerCase().includes(q) ||
           (v.description || '').toLowerCase().includes(q))
     );
-  }, [serverVariants, localVariants, query, hiddenContent.variants]);
+  }, [externalPublicVariants, serverVariants, localVariants, query, hiddenContent.variants]);
 
   const handleRandomPublic = () => {
     if (publicVariants.length === 0) {
@@ -201,17 +237,17 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
     if (countdown <= 0) {
       cancelMatchmaking();
       onNotify('Aucun joueur disponible — une IA adaptée prend le relais.');
-      onPlayAiVariant(selectedVariant);
+      onPlayAiVariant(selectedVariant, competitive);
       return;
     }
     const timer = setTimeout(() => setCountdown((c) => c - 1), 1000);
     return () => clearTimeout(timer);
-  }, [searchingOnline, countdown, selectedVariant]);
+  }, [searchingOnline, countdown, selectedVariant, competitive]);
 
   const startMatchmaking = (v: Variant, randomMode = false) => {
     setSelectedVariant(v);
     setSearchingOnline(true);
-    setCountdown(8);
+    setCountdown(10);
 
     try {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -226,6 +262,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
             nickname: profile.nickname || 'Joueur',
             eol: profile.eol,
             mode: randomMode ? 'random' : 'specific',
+            competitive,
             variantId: randomMode ? null : v.id,
             variantSnapshot: v,
           })
@@ -236,11 +273,13 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
         try {
           const msg = JSON.parse(ev.data) as Record<string, unknown>;
           if (msg.type === 'match:found') {
+            matchedHandedOffRef.current = true;
             setSearchingOnline(false);
             onOnlineMatched({
               roomId: String(msg.roomId),
               code: String(msg.code),
-              yourSide: msg.yourSide === 'black' ? 'black' : 'white',
+              yourSide: (msg.yourSide as PlayerSide) || 'white',
+              competitive: msg.competitive !== false,
               variant: msg.variant as Variant,
               opponent: msg.opponent as {
                 userId: string;
@@ -248,6 +287,13 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
                 eol: number;
                 theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
               },
+              participants: Array.isArray(msg.participants)
+                ? (msg.participants as OnlineHumanSeat[])
+                : undefined,
+              aiSeats: Array.isArray(msg.aiSeats)
+                ? (msg.aiSeats as OnlineAiSeat[])
+                : undefined,
+              hostUserId: typeof msg.hostUserId === 'string' ? msg.hostUserId : undefined,
               ws,
             });
           }
@@ -262,8 +308,16 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
 
   const cancelMatchmaking = () => {
     setSearchingOnline(false);
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'matchmaking:leave' }));
+    if (wsRef.current) {
+      try {
+        if (wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'matchmaking:leave' }));
+        }
+        wsRef.current.close();
+      } catch {
+        // ignore
+      }
+      wsRef.current = null;
     }
   };
 
@@ -483,21 +537,62 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
               showEolPreview
             />
 
+            {/* Choix Compétitif vs Amical */}
+            <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-[#0f151f] space-y-2">
+              <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                Mode de classement avant de commencer
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCompetitive(true)}
+                  className={`px-3 py-2 rounded-xl border text-left transition-colors ${
+                    competitive
+                      ? 'border-sky-500 bg-sky-500/15 text-sky-400 font-semibold'
+                      : 'border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  <div className="text-xs font-bold">Compétitif (ÉOL en jeu)</div>
+                  <div className="text-[11px] opacity-80">100 % en ligne · −50 % vs IA</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCompetitive(false)}
+                  className={`px-3 py-2 rounded-xl border text-left transition-colors ${
+                    !competitive
+                      ? 'border-emerald-500 bg-emerald-500/15 text-emerald-400 font-semibold'
+                      : 'border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  <div className="text-xs font-bold">Amical (sans ÉOL)</div>
+                  <div className="text-[11px] opacity-80">Aucun point ÉOL en jeu</div>
+                </button>
+              </div>
+            </div>
+
             {/* Matchmaking ou lancement IA */}
             {searchingOnline ? (
               <div className="p-4 rounded-xl border border-violet-500/40 bg-violet-500/10 space-y-3 text-center">
                 <div className="text-sm font-semibold text-violet-300">
                   Recherche d’un adversaire ÉOL proche de {profile.eol}… ({countdown}s)
                 </div>
+                <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full bg-violet-400 transition-all duration-1000"
+                    style={{ width: `${Math.max(5, (countdown / 10) * 100)}%` }}
+                  />
+                </div>
                 <p className="text-xs text-slate-400">
-                  Si aucun adversaire n’est disponible à la fin du délai, une IA adaptée prendra le relais.
+                  {(selectedVariant.players || 2) > 2
+                    ? `Variante à ${selectedVariant.players} joueurs : après 10s, si des places restent libres, des IA complèteront automatiquement la partie avec les joueurs connectés.`
+                    : `Délai de 10 secondes pour trouver le meilleur adversaire. Si personne n’est disponible, une IA Niveau ${recommendedAiMeta.level} (~${recommendedAiMeta.approxEol} ÉOL) prendra le relais.`}
                 </p>
                 <div className="flex justify-center gap-2">
                   <button
                     type="button"
                     onClick={() => {
                       cancelMatchmaking();
-                      onPlayAiVariant(selectedVariant);
+                      onPlayAiVariant(selectedVariant, competitive);
                     }}
                     className="px-4 py-2 rounded-xl bg-sky-500 text-slate-950 font-semibold text-xs min-h-[40px]"
                   >
@@ -520,15 +615,20 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
                   className="inline-flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm min-h-[48px]"
                 >
                   <Globe className="w-4 h-4" />
-                  <span>Matchmaking en ligne</span>
+                  <span>
+                    {competitive ? 'Matchmaking compétitif (10s)' : 'Matchmaking amical (10s)'}
+                  </span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => onPlayAiVariant(selectedVariant)}
+                  onClick={() => onPlayAiVariant(selectedVariant, competitive)}
                   className="inline-flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-sm min-h-[48px]"
                 >
                   <Bot className="w-4 h-4" />
-                  <span>Jouer contre l’IA</span>
+                  <span>
+                    IA Niv.{recommendedAiMeta.level} (~{recommendedAiMeta.approxEol} ÉOL)
+                    {competitive ? ' · −50 %' : ' · Amical'}
+                  </span>
                 </button>
               </div>
             )}

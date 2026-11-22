@@ -1,18 +1,28 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Bot,
+  Check,
+  Clock,
+  Copy,
   Flag,
   Globe,
   Handshake,
   Info,
+  Link2,
+  Maximize2,
+  Minimize2,
   Play,
   RotateCcw,
   Save,
   Sparkles,
   Star,
   Trash2,
+  Trophy,
+  Undo2,
   Users,
   Wand2,
+  X,
 } from 'lucide-react';
 import { chooseBestAiMove } from '../engine/aiEngine';
 import {
@@ -28,37 +38,77 @@ import {
   type GameState,
   type LegalMove,
 } from '../engine/chessEngine';
+import {
+  areSidesAllied,
+  formatTeamLabel,
+  getRemainingTeamGroups,
+  getTeamSides,
+} from '../engine/ruleParser';
 import { computeEolTransfer } from '../engine/eol';
 import {
   AI_LEVELS,
+  getClosestAiLevelForEol,
   type AiDifficultyLevel,
   type AppSettings,
   type EolBreakdown,
   type GameMode,
   type GameRecord,
+  type OnlineAiSeat,
+  type OnlineHumanSeat,
   type PieceDef,
   type PlayerSide,
   type Profile,
+  type ReplayMove,
   type Variant,
 } from '../types/chess';
 import { playChessSound } from '../utils/sound';
+import { safeUuid } from '../utils/safeId';
+import {
+  clearActiveOnlineSession,
+  loadActiveOnlineSession,
+  saveActiveOnlineSession,
+} from '../utils/storage';
 import { ChessBoard } from './ChessBoard';
 import { VariantRulesSummary } from './VariantRulesSummary';
+
+interface WaitingPlayerInfo {
+  userId: string;
+  nickname: string;
+  eol: number;
+}
+
+interface DisconnectedPlayerBanner {
+  userId: string;
+  nickname: string;
+  side: PlayerSide;
+  remainingSec: number;
+}
+
+interface SeatConfig {
+  kind: 'ai' | 'human';
+  aiLevel: AiDifficultyLevel;
+}
 
 interface GamePlayProps {
   variants: Variant[];
   selectedVariantId: string | null;
   initialMode?: GameMode;
+  initialCompetitive?: boolean;
+  initialJoinRoomCode?: string;
   autoMatchedRoom?: {
     roomId: string;
     code: string;
-    yourSide: 'white' | 'black';
+    yourSide: PlayerSide;
+    competitive?: boolean;
     opponent: {
       userId: string;
       nickname: string;
       eol: number;
       theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
     };
+    participants?: OnlineHumanSeat[];
+    aiSeats?: OnlineAiSeat[];
+    hostUserId?: string;
     ws: WebSocket;
   } | null;
   profile: Profile;
@@ -72,16 +122,85 @@ interface GamePlayProps {
   onNotify: (msg: string) => void;
 }
 
+const VALID_SIDES: PlayerSide[] = ['white', 'black', 'red', 'blue', 'green', 'gold'];
+
+const SIDE_SWATCH: Record<PlayerSide, string> = {
+  white: 'bg-slate-100 border-slate-400',
+  black: 'bg-slate-900 border-slate-500',
+  red: 'bg-rose-500 border-rose-300',
+  blue: 'bg-sky-500 border-sky-300',
+  green: 'bg-emerald-500 border-emerald-300',
+  gold: 'bg-amber-400 border-amber-200',
+};
+
+function parsePlayerSide(raw: unknown, fallback: PlayerSide = 'white'): PlayerSide {
+  return typeof raw === 'string' && VALID_SIDES.includes(raw as PlayerSide)
+    ? (raw as PlayerSide)
+    : fallback;
+}
+
 function formatClock(sec: number): string {
   const m = Math.floor(Math.max(0, sec) / 60);
   const s = Math.floor(Math.max(0, sec) % 60);
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function formatMinSec(sec: number): string {
+  const clamped = Math.max(0, Math.floor(sec));
+  const m = Math.floor(clamped / 60);
+  const s = clamped % 60;
+  return `${m} min et ${String(s).padStart(2, '0')} sec`;
+}
+
+function toReplayMove(m: LegalMove): ReplayMove {
+  return {
+    from: m.from,
+    to: m.to,
+    ...(m.captureIndex !== undefined ? { captureIndex: m.captureIndex } : {}),
+    ...(m.promotionPieceId ? { promotionPieceId: m.promotionPieceId } : {}),
+    ...(m.isCastle ? { isCastle: m.isCastle } : {}),
+    ...(m.isEnPassant ? { isEnPassant: m.isEnPassant } : {}),
+    ...(m.isPower ? { isPower: m.isPower } : {}),
+    ...(m.powerTarget !== undefined ? { powerTarget: m.powerTarget } : {}),
+    ...(m.description ? { description: m.description } : {}),
+  };
+}
+
+function formatEndCondition(gs: GameState): string {
+  const reason = (gs.endReason || '').trim();
+  if (!reason) return 'fin de partie';
+  const low = reason.toLowerCase();
+  if (low.includes('échec et mat')) return 'échec et mat';
+  if (low.includes('pat fait gagner')) return 'pat victorieux';
+  if (low.includes('pat')) return 'pat';
+  if (low.includes('déconnexion')) return 'abandon automatique après déconnexion';
+  if (low.includes('abandon')) return 'abandon';
+  if (low.includes('temps écoulé')) return 'temps écoulé';
+  if (low.includes('match nul accepté') || low.includes('match nul convenu')) return 'accord mutuel';
+  if (low.includes('50 coups')) return 'règle des 50 coups';
+  if (low.includes('case royale')) return 'occupation de la case royale';
+  if (low.includes('case spéciale')) return 'occupation d’une case spéciale';
+  if (low.includes('dernière rangée')) return 'atteinte de la dernière rangée';
+  if (low.includes('captures')) {
+    const m = reason.match(/atteignent\s+(\d+)\s+captures/i);
+    return m ? `objectif de ${m[1]} captures atteint` : 'objectif de captures atteint';
+  }
+  if (low.includes('échecs')) {
+    const m = reason.match(/avec\s+(\d+)\s+échecs/i);
+    return m ? `${m[1]} échecs délivrés` : 'échecs cumulés';
+  }
+  if (low.includes('qui-perd-gagne')) return 'règle Qui-perd-gagne';
+  if (low.includes('aucun coup légal')) return 'blocage complet';
+  if (low.includes('remportent la partie')) return 'capture du roi / élimination';
+  return reason.replace(/[.!]+$/, '').replace(/^[A-ZÀÂÉÈÊËÎÏÔÙÛÇ]/, (c) => c.toLowerCase());
+}
+
 export const GamePlay: React.FC<GamePlayProps> = ({
   variants,
   selectedVariantId,
   initialMode = 'ai',
+  initialCompetitive = true,
+  initialJoinRoomCode = '',
   autoMatchedRoom = null,
   profile,
   customPieces,
@@ -98,15 +217,76 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     [variants, selectedVariantId]
   );
 
+  const recommendedAiLevel = useMemo(
+    () => getClosestAiLevelForEol(profile.eol),
+    [profile.eol]
+  );
+  const recommendedAiMeta = useMemo(
+    () => AI_LEVELS.find((l) => l.level === recommendedAiLevel) || AI_LEVELS[2],
+    [recommendedAiLevel]
+  );
+
   const [mode, setMode] = useState<GameMode>(autoMatchedRoom ? 'online' : initialMode);
-  const [aiLevel, setAiLevel] = useState<AiDifficultyLevel>(5);
+  const [lobbyCompetitive, setLobbyCompetitive] = useState<boolean>(
+    autoMatchedRoom ? autoMatchedRoom.competitive !== false : initialCompetitive
+  );
+  const [activeCompetitive, setActiveCompetitive] = useState<boolean>(
+    autoMatchedRoom ? autoMatchedRoom.competitive !== false : initialCompetitive
+  );
+  const [aiLevel, setAiLevel] = useState<AiDifficultyLevel>(() =>
+    getClosestAiLevelForEol(profile.eol)
+  );
+  const [aiLevelCustomPicked, setAiLevelCustomPicked] = useState(false);
+
+  // User color choice for AI & Local practice (default random)
+  const [preferredSide, setPreferredSide] = useState<'random' | PlayerSide>('random');
+
+  // Per-opponent configuration for >2-player games
+  const [multiSeatConfigs, setMultiSeatConfigs] = useState<SeatConfig[]>(() =>
+    Array.from({ length: 5 }, (_, idx) => ({
+      kind: idx === 0 ? 'human' : 'ai',
+      aiLevel: getClosestAiLevelForEol(profile.eol),
+    }))
+  );
+
   const [phase, setPhase] = useState<'lobby' | 'playing' | 'ended'>(
     autoMatchedRoom ? 'playing' : 'lobby'
   );
 
+  useEffect(() => {
+    const scrollTop = () => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    };
+    scrollTop();
+    const raf = requestAnimationFrame(scrollTop);
+    return () => cancelAnimationFrame(raf);
+  }, [phase]);
+
   const [gameState, setGameState] = useState<GameState | null>(() =>
     activeVariant ? createInitialGameState(activeVariant, customPieces) : null
   );
+  const [undoStack, setUndoStack] = useState<GameState[]>([]);
+  const [undoMovesLenStack, setUndoMovesLenStack] = useState<number[]>([]);
+  const [recordedMoves, setRecordedMoves] = useState<ReplayMove[]>([]);
+  const [myPlayerSide, setMyPlayerSide] = useState<PlayerSide>(
+    autoMatchedRoom?.yourSide || 'white'
+  );
+  const [aiSides, setAiSides] = useState<PlayerSide[]>(() =>
+    autoMatchedRoom?.aiSeats ? autoMatchedRoom.aiSeats.map((a) => a.side) : []
+  );
+  const [aiLevelsBySide, setAiLevelsBySide] = useState<Partial<Record<PlayerSide, AiDifficultyLevel>>>(
+    () => {
+      const map: Partial<Record<PlayerSide, AiDifficultyLevel>> = {};
+      for (const a of autoMatchedRoom?.aiSeats || []) {
+        map[a.side] = a.level;
+      }
+      return map;
+    }
+  );
+
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectedSquare, setSelectedSquare] = useState<number | null>(null);
   const [analysisTrayPiece, setAnalysisTrayPiece] = useState<string>('builtin:Q|white');
   const [showRulesModal, setShowRulesModal] = useState(false);
@@ -127,34 +307,139 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     gold: 600,
   });
 
-  // Online Room state
+  // Online Room & Matchmaking state
   const [onlineWs, setOnlineWs] = useState<WebSocket | null>(autoMatchedRoom?.ws || null);
   const [onlineRoomId, setOnlineRoomId] = useState<string | null>(autoMatchedRoom?.roomId || null);
   const [onlineCode, setOnlineCode] = useState<string>(autoMatchedRoom?.code || '');
-  const [joinCodeInput, setJoinCodeInput] = useState('');
-  const [myOnlineSide, setMyOnlineSide] = useState<'white' | 'black'>(
+  const [joinCodeInput, setJoinCodeInput] = useState(initialJoinRoomCode);
+  const [myOnlineSide, setMyOnlineSide] = useState<PlayerSide>(
     autoMatchedRoom?.yourSide || 'white'
   );
   const [onlineOpponent, setOnlineOpponent] = useState(autoMatchedRoom?.opponent || null);
+  const [onlineParticipants, setOnlineParticipants] = useState<OnlineHumanSeat[]>(
+    autoMatchedRoom?.participants || []
+  );
+  const [onlineAiSeats, setOnlineAiSeats] = useState<OnlineAiSeat[]>(
+    autoMatchedRoom?.aiSeats || []
+  );
+  const [onlineHostUserId, setOnlineHostUserId] = useState<string | null>(
+    autoMatchedRoom?.hostUserId || null
+  );
   const [waitingRoomCode, setWaitingRoomCode] = useState<string | null>(null);
+  const [onlineWaitingPlayers, setOnlineWaitingPlayers] = useState<WaitingPlayerInfo[]>([]);
+  const [onlineTargetPlayers, setOnlineTargetPlayers] = useState<number>(2);
+  const [fillerAiLevels, setFillerAiLevels] = useState<AiDifficultyLevel[]>([]);
+  const [disconnectedOpponents, setDisconnectedOpponents] = useState<DisconnectedPlayerBanner[]>([]);
+  const [copiedHint, setCopiedHint] = useState<'code' | 'link' | null>(null);
+
+  const [matchmakingActive, setMatchmakingActive] = useState(false);
+  const [matchmakingCountdown, setMatchmakingCountdown] = useState(10);
 
   const gameRecordedRef = useRef(false);
+  const onlineWsRef = useRef<WebSocket | null>(onlineWs);
+  onlineWsRef.current = onlineWs;
+  const autoJoinedUrlCodeRef = useRef<string>('');
+  const attemptedSessionResumeRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      if (onlineWsRef.current) {
+        try {
+          onlineWsRef.current.close();
+        } catch {
+          // ignore
+        }
+        onlineWsRef.current = null;
+      }
+    };
+  }, []);
+
+  const lobbyAvailableSides = useMemo(
+    () => VALID_SIDES.slice(0, Math.max(2, Math.min(6, activeVariant?.players || 2))),
+    [activeVariant?.players]
+  );
+
+  // Reset preferredSide to random if current side exceeds new variant player count
+  useEffect(() => {
+    if (preferredSide !== 'random' && !lobbyAvailableSides.includes(preferredSide)) {
+      setPreferredSide('random');
+    }
+  }, [lobbyAvailableSides, preferredSide]);
+
+  useEffect(() => {
+    if (!aiLevelCustomPicked) {
+      setAiLevel(recommendedAiLevel);
+    }
+  }, [recommendedAiLevel, aiLevelCustomPicked]);
+
+  useEffect(() => {
+    if (phase === 'lobby' && !aiLevelCustomPicked) {
+      setMultiSeatConfigs((prev) =>
+        prev.map((cfg) => ({ ...cfg, aiLevel: recommendedAiLevel }))
+      );
+    }
+  }, [recommendedAiLevel, phase, aiLevelCustomPicked]);
+
+  useEffect(() => {
+    setLobbyCompetitive(initialCompetitive);
+  }, [initialCompetitive]);
+
+  useEffect(() => {
+    if (initialJoinRoomCode) {
+      setJoinCodeInput(initialJoinRoomCode.toUpperCase());
+    }
+  }, [initialJoinRoomCode]);
+
+  useEffect(() => {
+    const missing = Math.max(0, onlineTargetPlayers - onlineWaitingPlayers.length);
+    setFillerAiLevels((prev) =>
+      Array.from({ length: missing }, (_, idx) => prev[idx] || recommendedAiLevel)
+    );
+  }, [onlineTargetPlayers, onlineWaitingPlayers.length, recommendedAiLevel]);
 
   // Sync external autoMatchedRoom (from Discover)
   useEffect(() => {
     if (autoMatchedRoom && activeVariant) {
+      const comp = autoMatchedRoom.competitive !== false;
+      const incomingAi = autoMatchedRoom.aiSeats || [];
+      const lvlMap: Partial<Record<PlayerSide, AiDifficultyLevel>> = {};
+      for (const seat of incomingAi) {
+        lvlMap[seat.side] = seat.level;
+      }
       setMode('online');
+      setMatchmakingActive(false);
+      setWaitingRoomCode(null);
+      setActiveCompetitive(comp);
+      setLobbyCompetitive(comp);
       setOnlineWs(autoMatchedRoom.ws);
       setOnlineRoomId(autoMatchedRoom.roomId);
       setOnlineCode(autoMatchedRoom.code);
       setMyOnlineSide(autoMatchedRoom.yourSide);
+      setMyPlayerSide(autoMatchedRoom.yourSide);
       setOnlineOpponent(autoMatchedRoom.opponent);
+      setOnlineParticipants(autoMatchedRoom.participants || []);
+      setOnlineAiSeats(incomingAi);
+      setOnlineHostUserId(autoMatchedRoom.hostUserId || null);
+      setDisconnectedOpponents([]);
+      setAiSides(incomingAi.map((a) => a.side));
+      setAiLevelsBySide(lvlMap);
       const fresh = createInitialGameState(activeVariant, customPieces);
       setGameState(fresh);
+      setUndoStack([]);
+      setUndoMovesLenStack([]);
+      setRecordedMoves([]);
+      setSelectedSquare(null);
       resetClocks(activeVariant);
       gameRecordedRef.current = false;
       setLastEolBreakdown(null);
       setPhase('playing');
+      saveActiveOnlineSession({
+        roomId: autoMatchedRoom.roomId,
+        code: autoMatchedRoom.code,
+        userId: profile.id,
+        variantId: activeVariant.id,
+        savedAt: Date.now(),
+      });
     }
   }, [autoMatchedRoom]);
 
@@ -171,11 +456,53 @@ export const GamePlay: React.FC<GamePlayProps> = ({
   };
 
   // Start local / AI / analysis game
-  const startGame = (chosenMode: GameMode) => {
+  const startGame = (chosenMode: GameMode, overrideAiLevel?: AiDifficultyLevel) => {
     if (!activeVariant) return;
+    setMatchmakingActive(false);
+    setWaitingRoomCode(null);
+    setDisconnectedOpponents([]);
+    clearActiveOnlineSession();
     setMode(chosenMode);
     const fresh = createInitialGameState(activeVariant, customPieces);
+
+    const chosenSide: PlayerSide =
+      chosenMode === 'analysis'
+        ? 'white'
+        : preferredSide !== 'random' && fresh.activeSides.includes(preferredSide)
+          ? preferredSide
+          : fresh.activeSides[Math.floor(Math.random() * fresh.activeSides.length)] || 'white';
+
+    const effectiveMainAi = overrideAiLevel || aiLevel;
+    const otherSides = fresh.activeSides.filter((s) => s !== chosenSide);
+    const nextAiSides: PlayerSide[] = [];
+    const nextAiLevels: Partial<Record<PlayerSide, AiDifficultyLevel>> = {};
+
+    if (chosenMode === 'ai') {
+      otherSides.forEach((s, idx) => {
+        nextAiSides.push(s);
+        nextAiLevels[s] = idx === 0 ? effectiveMainAi : multiSeatConfigs[idx]?.aiLevel || effectiveMainAi;
+      });
+    } else if (chosenMode === 'local' && fresh.activeSides.length > 2) {
+      otherSides.forEach((s, idx) => {
+        const cfg = multiSeatConfigs[idx];
+        if (cfg && cfg.kind === 'ai') {
+          nextAiSides.push(s);
+          nextAiLevels[s] = cfg.aiLevel;
+        }
+      });
+    }
+
+    setAiSides(nextAiSides);
+    setAiLevelsBySide(nextAiLevels);
+    setOnlineParticipants([]);
+    setOnlineAiSeats([]);
+    setOnlineHostUserId(null);
+    setMyPlayerSide(chosenSide);
+    setActiveCompetitive(chosenMode === 'analysis' ? false : lobbyCompetitive);
     setGameState(fresh);
+    setUndoStack([]);
+    setUndoMovesLenStack([]);
+    setRecordedMoves([]);
     setSelectedSquare(null);
     setLastEolBreakdown(null);
     setEngineBadge(null);
@@ -183,13 +510,36 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     resetClocks(activeVariant);
     setPhase('playing');
     if (chosenMode === 'ai') {
+      const sideLabel = SIDE_LABELS[chosenSide];
       onNotify(
-        isStandardChessCompatible(activeVariant)
-          ? 'Partie lancée avec le moteur Stockfish.'
-          : 'Partie lancée avec le moteur IA adapté à la variante.'
+        isStandardChessCompatible(activeVariant) && fresh.activeSides.length === 2
+          ? `Partie lancée (Stockfish) — Vous jouez les ${sideLabel}.`
+          : `Partie lancée (IA variantes) — Vous jouez les ${sideLabel}.`
       );
+    } else if (chosenMode === 'local') {
+      onNotify(`Partie locale lancée — Vous jouez les ${SIDE_LABELS[chosenSide]}.`);
     }
   };
+
+  // In-lobby 10-second matchmaking countdown before falling back to ÉOL-matched AI
+  useEffect(() => {
+    if (!matchmakingActive || phase !== 'lobby') return;
+    if (matchmakingCountdown <= 0) {
+      setMatchmakingActive(false);
+      if (onlineWsRef.current && onlineWsRef.current.readyState === WebSocket.OPEN) {
+        onlineWsRef.current.send(JSON.stringify({ type: 'matchmaking:leave' }));
+      }
+      const fallbackLvl = recommendedAiLevel;
+      setAiLevel(fallbackLvl);
+      onNotify(
+        `Aucun adversaire trouvé en 10 s — Lancement contre l’IA Niveau ${fallbackLvl} (~${recommendedAiMeta.approxEol} ÉOL).`
+      );
+      startGame('ai', fallbackLvl);
+      return;
+    }
+    const timer = setTimeout(() => setMatchmakingCountdown((c) => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [matchmakingActive, matchmakingCountdown, phase, recommendedAiLevel, recommendedAiMeta.approxEol]);
 
   // Clock countdown
   useEffect(() => {
@@ -198,43 +548,90 @@ export const GamePlay: React.FC<GamePlayProps> = ({
 
     const timer = setInterval(() => {
       const turnSide = getCurrentTurnSide(gameState);
-      setClocks((prev) => {
-        const nextVal = Math.max(0, prev[turnSide] - 1);
-        if (nextVal === 0) {
-          const otherSides = gameState.activeSides.filter(
-            (s) => s !== turnSide && !gameState.eliminatedSides.includes(s)
-          );
-          const winner = otherSides[0] || 'draw';
-          setGameState((curr) =>
-            curr
-              ? {
-                  ...curr,
-                  winner,
-                  endReason: `Temps écoulé pour les ${SIDE_LABELS[turnSide]}.`,
-                }
-              : curr
-          );
-        }
-        return { ...prev, [turnSide]: nextVal };
-      });
+      setClocks((prev) => ({
+        ...prev,
+        [turnSide]: Math.max(0, prev[turnSide] - 1),
+      }));
     }, 1000);
 
     return () => clearInterval(timer);
   }, [phase, gameState?.turnIndex, gameState?.winner, mode]);
 
-  // Trigger game completion + ÉOL recording when gameState.winner becomes non-null
+  // Trigger timeout cleanly when active clock reaches 0 (local/AI; online timeout comes authoritatively or notifies server)
+  useEffect(() => {
+    if (phase !== 'playing' || !gameState || gameState.winner || mode === 'analysis') return;
+    if ((gameState.variant.duration || 0) <= 0) return;
+    const turnSide = getCurrentTurnSide(gameState);
+    if (clocks[turnSide] > 0) return;
+
+    if (mode === 'online' && onlineWs && onlineRoomId) {
+      onlineWs.send(
+        JSON.stringify({
+          type: 'game:timeout',
+          roomId: onlineRoomId,
+          timedOutSide: turnSide,
+        })
+      );
+    }
+
+    const rules = gameState.compiledRules;
+    setGameState((curr) => {
+      if (!curr || curr.winner) return curr;
+      const next = cloneGameState(curr);
+      if (!next.eliminatedSides.includes(turnSide)) {
+        next.eliminatedSides.push(turnSide);
+      }
+      if (rules?.teamSharedElimination) {
+        for (const ally of getTeamSides(rules, turnSide)) {
+          if (next.activeSides.includes(ally) && !next.eliminatedSides.includes(ally)) {
+            next.eliminatedSides.push(ally);
+          }
+        }
+      }
+      const remainingGroups = getRemainingTeamGroups(rules, next.activeSides, next.eliminatedSides);
+      if (remainingGroups.length === 0) {
+        next.winner = 'draw';
+        next.winningTeam = null;
+        next.endReason = `Temps écoulé pour les ${SIDE_LABELS[turnSide]}.`;
+        return next;
+      }
+      if (remainingGroups.length === 1) {
+        const winGroup = remainingGroups[0];
+        next.winner = winGroup[0];
+        next.winningTeam = winGroup.length > 1 ? winGroup : null;
+        next.endReason =
+          winGroup.length > 1
+            ? `Temps écoulé pour les ${SIDE_LABELS[turnSide]}. Victoire de l’équipe ${formatTeamLabel(winGroup)} !`
+            : `Temps écoulé pour les ${SIDE_LABELS[turnSide]}.`;
+        return next;
+      }
+      let nxt = (next.turnIndex + 1) % next.activeSides.length;
+      let guard = 0;
+      while (next.eliminatedSides.includes(next.activeSides[nxt]) && guard < next.activeSides.length) {
+        nxt = (nxt + 1) % next.activeSides.length;
+        guard++;
+      }
+      next.turnIndex = nxt;
+      return next;
+    });
+  }, [clocks, phase, gameState, mode, onlineWs, onlineRoomId]);
+
+  // Trigger game completion + ÉOL recording + save replayMoves when gameState.winner becomes non-null
   useEffect(() => {
     if (!gameState || !gameState.winner || gameRecordedRef.current || mode === 'analysis') return;
     gameRecordedRef.current = true;
     setPhase('ended');
+    if (mode === 'online') {
+      clearActiveOnlineSession();
+      setDisconnectedOpponents([]);
+    }
 
-    const mySide: PlayerSide = mode === 'online' ? myOnlineSide : 'white';
+    const mySide: PlayerSide = mode === 'online' ? myOnlineSide : myPlayerSide;
+    const didIWin =
+      gameState.winner !== 'draw' &&
+      areSidesAllied(gameState.compiledRules, gameState.winner, mySide);
     const result: 'win' | 'loss' | 'draw' =
-      gameState.winner === 'draw'
-        ? 'draw'
-        : gameState.winner === mySide
-          ? 'win'
-          : 'loss';
+      gameState.winner === 'draw' ? 'draw' : didIWin ? 'win' : 'loss';
 
     playChessSound(
       result === 'draw' ? 'draw' : 'win',
@@ -242,63 +639,117 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       settings.volume
     );
 
-    let breakdown: EolBreakdown | undefined;
-    if (mode === 'ai' || mode === 'online') {
-      const oppEol =
-        mode === 'online'
-          ? onlineOpponent?.eol || 400
-          : 250 + aiLevel * 65; // AI ÉOL scale across 10 levels
-      const oppName =
-        mode === 'online'
-          ? onlineOpponent?.nickname || 'Adversaire en ligne'
-          : `IA ${AI_LEVELS.find((l) => l.level === aiLevel)?.label || ''}`;
-      const isCreator = gameState.variant.creatorId === profile.id;
+    const resolveOppStats = () => {
+      if (mode === 'online') {
+        const humans = onlineParticipants.filter((p) => p.userId !== profile.id);
+        const aiEols = onlineAiSeats.map((a) => a.approxEol);
+        const allEols = [...humans.map((h) => h.eol), ...aiEols];
+        const avgEol =
+          allEols.length > 0
+            ? Math.round(allEols.reduce((s, e) => s + e, 0) / allEols.length)
+            : onlineOpponent?.eol || 400;
+        const nameList = [...humans.map((h) => h.nickname), ...onlineAiSeats.map((a) => a.nickname)];
+        return {
+          eol: avgEol,
+          name: nameList.length > 0 ? nameList.join(', ') : onlineOpponent?.nickname || 'Adversaire en ligne',
+          isCreator: humans.some((h) => h.userId === gameState.variant.creatorId),
+        };
+      }
+      if (mode === 'ai') {
+        const levelsUsed =
+          aiSides.length > 0
+            ? aiSides.map((s) => aiLevelsBySide[s] || aiLevel)
+            : [aiLevel];
+        const eols = levelsUsed.map(
+          (lvl) => AI_LEVELS.find((l) => l.level === lvl)?.approxEol || 400
+        );
+        const avg = Math.round(eols.reduce((a, b) => a + b, 0) / eols.length);
+        const firstMeta = AI_LEVELS.find((l) => l.level === levelsUsed[0]) || AI_LEVELS[2];
+        return {
+          eol: avg,
+          name:
+            levelsUsed.length > 1
+              ? `${levelsUsed.length} IA (~${avg} ÉOL)`
+              : `IA ${firstMeta.label} (~${firstMeta.approxEol} ÉOL)`,
+          isCreator: false,
+        };
+      }
+      return {
+        eol: Math.max(300, profile.eol),
+        name: gameState.activeSides.length > 2 ? 'Joueurs locaux' : 'Joueur local',
+        isCreator: false,
+      };
+    };
 
-      breakdown = computeEolTransfer({
+    const oppStats = resolveOppStats();
+
+    if (activeCompetitive && (mode === 'ai' || mode === 'online' || mode === 'local')) {
+      const isCreator = gameState.variant.creatorId === profile.id;
+      const hasAiInOnline = mode === 'online' && onlineAiSeats.length > 0;
+      const modeMultiplier = mode === 'online' && !hasAiInOnline ? 1 : 0.5;
+
+      const breakdown = computeEolTransfer({
         playerEol: profile.eol,
-        opponentEol: oppEol,
+        opponentEol: oppStats.eol,
         result,
         variant: gameState.variant,
         playerPriorGames: profile.variantPlayCounts?.[gameState.variant.id] || 0,
         opponentPriorGames: 2,
         isPlayerCreator: isCreator,
-        isOpponentCreator:
-          mode === 'online' && onlineOpponent?.userId === gameState.variant.creatorId,
+        isOpponentCreator: oppStats.isCreator,
         movesCount: gameState.moveHistory.length,
+        modeMultiplier,
       });
       setLastEolBreakdown(breakdown);
 
       const rec: GameRecord = {
-        id: `gm_${crypto.randomUUID().slice(0, 10)}`,
-        type: mode === 'online' ? 'Partie en ligne' : 'Partie contre IA',
+        id: `gm_${safeUuid().slice(0, 10)}`,
+        type:
+          mode === 'online'
+            ? 'Partie en ligne'
+            : mode === 'ai'
+              ? 'Partie contre IA'
+              : 'Partie locale',
         mode,
+        competitive: true,
         variantId: gameState.variant.id,
         variantName: gameState.variant.name,
+        variantSnapshot: gameState.variant,
         creatorName: gameState.variant.creator,
-        opponentName: oppName,
-        opponentEol: oppEol,
+        opponentName: oppStats.name,
+        opponentEol: oppStats.eol,
         playerSide: mySide,
         result,
         reason: gameState.endReason || undefined,
         movesCount: gameState.moveHistory.length,
+        replayMoves: recordedMoves,
         date: new Date().toISOString(),
         eolBreakdown: breakdown,
         userRating: userRatings[gameState.variant.id],
       };
       onFinishGame(rec, breakdown.counted ? breakdown.playerEolAfter : undefined);
     } else {
+      setLastEolBreakdown(null);
       const rec: GameRecord = {
-        id: `gm_${crypto.randomUUID().slice(0, 10)}`,
-        type: 'Partie locale',
-        mode: 'local',
+        id: `gm_${safeUuid().slice(0, 10)}`,
+        type:
+          mode === 'online'
+            ? 'Partie en ligne'
+            : mode === 'ai'
+              ? 'Partie contre IA'
+              : 'Partie locale',
+        mode,
+        competitive: false,
         variantId: gameState.variant.id,
         variantName: gameState.variant.name,
+        variantSnapshot: gameState.variant,
         creatorName: gameState.variant.creator,
-        opponentName: 'Joueur local',
-        playerSide: 'white',
+        opponentName: oppStats.name,
+        playerSide: mySide,
         result,
         reason: gameState.endReason || undefined,
         movesCount: gameState.moveHistory.length,
+        replayMoves: recordedMoves,
         date: new Date().toISOString(),
         userRating: userRatings[gameState.variant.id],
       };
@@ -306,41 +757,153 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     }
   }, [gameState?.winner]);
 
-  // AI Turn automation
+  // AI Turn automation with realistic human pacing (950ms–1750ms)
   useEffect(() => {
-    if (
-      phase !== 'playing' ||
-      mode !== 'ai' ||
-      !gameState ||
-      gameState.winner ||
-      getCurrentTurnSide(gameState) === 'white'
-    ) {
-      return;
-    }
+    if (phase !== 'playing' || !gameState || gameState.winner || mode === 'analysis') return;
+    const activeSide = getCurrentTurnSide(gameState);
 
+    const isAiControlledSide =
+      mode === 'ai'
+        ? activeSide !== myPlayerSide
+        : mode === 'local'
+          ? aiSides.includes(activeSide)
+          : mode === 'online'
+            ? aiSides.includes(activeSide) && onlineHostUserId === profile.id
+            : false;
+
+    if (!isAiControlledSide) return;
+
+    const sideLevel = aiLevelsBySide[activeSide] || aiLevel;
     let cancelled = false;
     setAiThinking(true);
 
-    const timer = setTimeout(async () => {
-      const { move, engineUsed } = await chooseBestAiMove(gameState, aiLevel);
+    const runAiTurn = async () => {
+      const startedAt = Date.now();
+      // Natural human thinking delay: 580–1000ms for fluid cadence
+      const humanDelayMs = 580 + Math.floor(Math.random() * 420);
+      const { move, engineUsed } = await chooseBestAiMove(gameState, sideLevel);
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < humanDelayMs) {
+        await new Promise((r) => setTimeout(r, humanDelayMs - elapsed));
+      }
       if (cancelled) return;
       setAiThinking(false);
       setEngineBadge(engineUsed);
 
       if (!move) {
-        setGameState((prev) =>
-          prev
-            ? {
-                ...prev,
-                winner: 'white',
-                endReason: 'L’IA n’a plus de coup légal disponible.',
+        const rules = gameState.compiledRules;
+        if (rules.reverseWin) {
+          const winTeam = getTeamSides(rules, activeSide).filter((m) =>
+            gameState.activeSides.includes(m)
+          );
+          setGameState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  winner: activeSide,
+                  winningTeam: winTeam.length > 1 ? winTeam : null,
+                  endReason: `L’IA (${SIDE_LABELS[activeSide]}) n’a plus de coup légal — Qui-perd-gagne.`,
+                }
+              : prev
+          );
+          return;
+        }
+
+        const isCheckmatedOrStalemateWin =
+          gameState.inCheckSides.includes(activeSide) || rules.stalemateWins;
+
+        setGameState((prev) => {
+          if (!prev || prev.winner) return prev;
+          const next = cloneGameState(prev);
+          if (isCheckmatedOrStalemateWin) {
+            if (!next.eliminatedSides.includes(activeSide)) {
+              next.eliminatedSides.push(activeSide);
+            }
+            if (rules.teamSharedElimination) {
+              for (const ally of getTeamSides(rules, activeSide)) {
+                if (next.activeSides.includes(ally) && !next.eliminatedSides.includes(ally)) {
+                  next.eliminatedSides.push(ally);
+                }
               }
-            : prev
-        );
+            }
+            const remainingGroups = getRemainingTeamGroups(
+              rules,
+              next.activeSides,
+              next.eliminatedSides
+            );
+            if (remainingGroups.length <= 1) {
+              const winGroup = remainingGroups[0];
+              next.winner = winGroup ? winGroup[0] : 'draw';
+              next.winningTeam = winGroup && winGroup.length > 1 ? winGroup : null;
+              next.endReason = winGroup
+                ? winGroup.length > 1
+                  ? `L’IA (${SIDE_LABELS[activeSide]}) n’a plus de coup légal. Victoire de l’équipe ${formatTeamLabel(winGroup)} !`
+                  : `L’IA (${SIDE_LABELS[activeSide]}) n’a plus de coup légal disponible.`
+                : 'Match nul.';
+              return next;
+            }
+          } else {
+            // Stalemate: if a teammate is alive on another side, pass the turn; otherwise draw/eliminate team
+            const aliveTeammates = getTeamSides(rules, activeSide).filter(
+              (m) => m !== activeSide && next.activeSides.includes(m) && !next.eliminatedSides.includes(m)
+            );
+            const currentGroups = getRemainingTeamGroups(
+              rules,
+              next.activeSides,
+              next.eliminatedSides
+            );
+            if (aliveTeammates.length === 0) {
+              if (currentGroups.length > 2) {
+                for (const m of getTeamSides(rules, activeSide)) {
+                  if (next.activeSides.includes(m) && !next.eliminatedSides.includes(m)) {
+                    next.eliminatedSides.push(m);
+                  }
+                }
+              } else {
+                next.winner = 'draw';
+                next.winningTeam = null;
+                next.endReason = 'Pat — L’IA n’a plus de coup légal disponible.';
+                return next;
+              }
+            }
+          }
+
+          let nxt = (next.turnIndex + 1) % next.activeSides.length;
+          let guard = 0;
+          while (
+            next.eliminatedSides.includes(next.activeSides[nxt]) &&
+            guard < next.activeSides.length
+          ) {
+            nxt = (nxt + 1) % next.activeSides.length;
+            guard++;
+          }
+          next.turnIndex = nxt;
+          return next;
+        });
         return;
       }
 
+      if (mode === 'ai' || mode === 'local') {
+        setUndoStack((prev) => [...prev, cloneGameState(gameState)]);
+        setUndoMovesLenStack((prev) => [...prev, recordedMoves.length]);
+      }
+
       const next = applyMove(gameState, move);
+      const turnFinished = next.turnIndex !== gameState.turnIndex;
+      const incSec = next.variant.incrementSec || 0;
+      if (
+        turnFinished &&
+        !next.winner &&
+        (next.variant.duration || 0) > 0 &&
+        incSec > 0 &&
+        mode !== 'online'
+      ) {
+        setClocks((prev) => ({
+          ...prev,
+          [activeSide]: (prev[activeSide] || 0) + incSec,
+        }));
+      }
+
       if (next.inCheckSides.length > 0) {
         playChessSound('check', settings.sound, settings.volume);
       } else if (move.isPower) {
@@ -350,16 +913,44 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       } else {
         playChessSound('move', settings.sound, settings.volume);
       }
+      setRecordedMoves((prev) => [...prev, toReplayMove(move)]);
       setGameState(next);
-    }, 350);
+
+      if (mode === 'online' && onlineWs && onlineRoomId) {
+        onlineWs.send(
+          JSON.stringify({
+            type: 'game:move',
+            roomId: onlineRoomId,
+            move,
+            turnFinished,
+            nextTurnSide: getCurrentTurnSide(next),
+            eliminatedSides: next.eliminatedSides,
+            winner: next.winner,
+          })
+        );
+      }
+    };
+
+    void runAiTurn();
 
     return () => {
       cancelled = true;
-      clearTimeout(timer);
     };
-  }, [phase, mode, gameState, aiLevel]);
+  }, [
+    phase,
+    mode,
+    gameState,
+    aiLevel,
+    aiSides,
+    aiLevelsBySide,
+    myPlayerSide,
+    onlineHostUserId,
+    profile.id,
+    onlineWs,
+    onlineRoomId,
+  ]);
 
-  // WebSocket listener for Online game
+  // WebSocket listener for Online rooms, matchmaking, clock sync & 5-min reconnect grace
   useEffect(() => {
     if (!onlineWs) return;
     const onMessage = (ev: MessageEvent<string>) => {
@@ -373,26 +964,153 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       if (msg.type === 'room:created') {
         setOnlineRoomId(String(msg.roomId));
         setWaitingRoomCode(String(msg.code));
-        setMyOnlineSide('white');
-        onNotify(`Salle créée ! Code : ${msg.code}`);
+        setOnlineTargetPlayers(Number(msg.targetPlayers || 2));
+        setOnlineHostUserId(String(msg.hostUserId || profile.id));
+        setOnlineWaitingPlayers(
+          Array.isArray(msg.players)
+            ? (msg.players as WaitingPlayerInfo[])
+            : [{ userId: profile.id, nickname: profile.nickname || 'Hôte', eol: profile.eol }]
+        );
+        onNotify(`Salle créée ! Partagez le code ${msg.code} ou le lien d’invitation.`);
+      } else if (msg.type === 'room:lobby_update') {
+        setOnlineRoomId(String(msg.roomId));
+        setWaitingRoomCode(String(msg.code));
+        setOnlineTargetPlayers(Number(msg.targetPlayers || 2));
+        setOnlineHostUserId(String(msg.hostUserId || ''));
+        if (Array.isArray(msg.players)) {
+          setOnlineWaitingPlayers(msg.players as WaitingPlayerInfo[]);
+        }
+      } else if (msg.type === 'room:host_changed') {
+        setOnlineHostUserId(String(msg.hostUserId || ''));
       } else if (msg.type === 'room:error') {
         onNotify(String(msg.message || 'Erreur de salle.'));
-      } else if (msg.type === 'match:found') {
+      } else if (msg.type === 'room:reconnect_expired') {
+        clearActiveOnlineSession();
+      } else if (msg.type === 'room:state_sync') {
         const v = msg.variant as Variant;
+        const assignedSide = parsePlayerSide(msg.yourSide, 'white');
+        const comp = msg.competitive !== false;
+        const incomingAi = Array.isArray(msg.aiSeats) ? (msg.aiSeats as OnlineAiSeat[]) : [];
+        const incomingHumans = Array.isArray(msg.participants)
+          ? (msg.participants as OnlineHumanSeat[])
+          : [];
+        const aiLvlMap: Partial<Record<PlayerSide, AiDifficultyLevel>> = {};
+        for (const a of incomingAi) {
+          aiLvlMap[a.side] = a.level;
+        }
+        const serverMoves = Array.isArray(msg.moves) ? (msg.moves as LegalMove[]) : [];
+        const combinedPieces = [...customPieces, ...(v.customPieceDefs || [])];
+        let rebuilt = createInitialGameState(v, combinedPieces);
+        for (const mv of serverMoves) {
+          rebuilt = applyMove(rebuilt, mv);
+        }
+
+        setMatchmakingActive(false);
         setOnlineRoomId(String(msg.roomId));
         setOnlineCode(String(msg.code));
         setWaitingRoomCode(null);
-        setMyOnlineSide(msg.yourSide === 'black' ? 'black' : 'white');
+        setMode('online');
+        setActiveCompetitive(comp);
+        setLobbyCompetitive(comp);
+        setMyOnlineSide(assignedSide);
+        setMyPlayerSide(assignedSide);
         setOnlineOpponent(msg.opponent as typeof onlineOpponent);
+        setOnlineParticipants(incomingHumans);
+        setOnlineAiSeats(incomingAi);
+        setOnlineHostUserId(msg.hostUserId ? String(msg.hostUserId) : null);
+        setAiSides(incomingAi.map((a) => a.side));
+        setAiLevelsBySide(aiLvlMap);
+        if (msg.clocks) {
+          setClocks(msg.clocks as Record<PlayerSide, number>);
+        } else {
+          resetClocks(v);
+        }
+        if (Array.isArray(msg.disconnectedPlayers)) {
+          setDisconnectedOpponents(
+            (msg.disconnectedPlayers as DisconnectedPlayerBanner[]).filter(
+              (d) => d.userId !== profile.id
+            )
+          );
+        } else {
+          setDisconnectedOpponents([]);
+        }
+        setRecordedMoves(serverMoves.map(toReplayMove));
+        setGameState(rebuilt);
+        setUndoStack([]);
+        setUndoMovesLenStack([]);
+        setSelectedSquare(null);
+        gameRecordedRef.current = Boolean(rebuilt.winner);
+        setPhase(rebuilt.winner ? 'ended' : 'playing');
+        saveActiveOnlineSession({
+          roomId: String(msg.roomId),
+          code: String(msg.code),
+          userId: profile.id,
+          variantId: v.id,
+          savedAt: Date.now(),
+        });
+        onNotify('Reconnecté à votre partie en ligne !');
+      } else if (msg.type === 'match:found') {
+        const v = msg.variant as Variant;
+        const assignedSide = parsePlayerSide(msg.yourSide, 'white');
+        const comp = msg.competitive !== false;
+        const incomingAi = Array.isArray(msg.aiSeats) ? (msg.aiSeats as OnlineAiSeat[]) : [];
+        const incomingHumans = Array.isArray(msg.participants)
+          ? (msg.participants as OnlineHumanSeat[])
+          : [];
+        const aiLvlMap: Partial<Record<PlayerSide, AiDifficultyLevel>> = {};
+        for (const a of incomingAi) {
+          aiLvlMap[a.side] = a.level;
+        }
+
+        setMatchmakingActive(false);
+        setOnlineRoomId(String(msg.roomId));
+        setOnlineCode(String(msg.code));
+        setWaitingRoomCode(null);
+        setMode('online');
+        setActiveCompetitive(comp);
+        setLobbyCompetitive(comp);
+        setMyOnlineSide(assignedSide);
+        setMyPlayerSide(assignedSide);
+        setOnlineOpponent(msg.opponent as typeof onlineOpponent);
+        setOnlineParticipants(incomingHumans);
+        setOnlineAiSeats(incomingAi);
+        setOnlineHostUserId(msg.hostUserId ? String(msg.hostUserId) : null);
+        setDisconnectedOpponents([]);
+        setAiSides(incomingAi.map((a) => a.side));
+        setAiLevelsBySide(aiLvlMap);
+
         const fresh = createInitialGameState(v, customPieces);
         setGameState(fresh);
-        resetClocks(v);
+        setUndoStack([]);
+        setUndoMovesLenStack([]);
+        setRecordedMoves([]);
+        setSelectedSquare(null);
+        if (msg.clocks) {
+          setClocks(msg.clocks as Record<PlayerSide, number>);
+        } else {
+          resetClocks(v);
+        }
         gameRecordedRef.current = false;
         setLastEolBreakdown(null);
         setPhase('playing');
-        onNotify('Adversaire connecté ! La partie commence.');
+        saveActiveOnlineSession({
+          roomId: String(msg.roomId),
+          code: String(msg.code),
+          userId: profile.id,
+          variantId: v.id,
+          savedAt: Date.now(),
+        });
+        onNotify(
+          incomingAi.length > 0
+            ? `Partie lancée avec ${incomingHumans.length} joueur(s) et ${incomingAi.length} IA ! Vous jouez les ${SIDE_LABELS[assignedSide]}.`
+            : `Adversaire connecté ! Vous jouez les ${SIDE_LABELS[assignedSide]} (${comp ? 'Compétitif' : 'Amical'}).`
+        );
       } else if (msg.type === 'game:move') {
         const move = msg.move as LegalMove;
+        if (msg.clocks) {
+          setClocks(msg.clocks as Record<PlayerSide, number>);
+        }
+        setRecordedMoves((prev) => [...prev, toReplayMove(move)]);
         setGameState((prev) => {
           if (!prev || prev.winner) return prev;
           const next = applyMove(prev, move);
@@ -405,6 +1123,27 @@ export const GamePlay: React.FC<GamePlayProps> = ({
           }
           return next;
         });
+      } else if (msg.type === 'room:clocks_sync') {
+        if (msg.clocks) {
+          setClocks(msg.clocks as Record<PlayerSide, number>);
+        }
+      } else if (msg.type === 'room:disconnect_countdown') {
+        const list = Array.isArray(msg.disconnectedPlayers)
+          ? (msg.disconnectedPlayers as DisconnectedPlayerBanner[]).filter(
+              (d) => d.userId !== profile.id
+            )
+          : [];
+        setDisconnectedOpponents(list);
+      } else if (msg.type === 'room:player_reconnected') {
+        const list = Array.isArray(msg.disconnectedPlayers)
+          ? (msg.disconnectedPlayers as DisconnectedPlayerBanner[]).filter(
+              (d) => d.userId !== profile.id
+            )
+          : [];
+        setDisconnectedOpponents(list);
+        if (msg.nickname) {
+          onNotify(`${msg.nickname} s’est reconnecté à la partie.`);
+        }
       } else if (msg.type === 'game:draw_offered') {
         setPendingDrawOffer('incoming');
         onNotify('Votre adversaire propose la nulle.');
@@ -412,25 +1151,95 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         if (msg.accepted) {
           setGameState((prev) =>
             prev
-              ? { ...prev, winner: 'draw', endReason: 'Match nul accepté par les deux joueurs.' }
+              ? { ...prev, winner: 'draw', endReason: 'Match nul accepté par les joueurs.' }
               : prev
           );
         } else {
           onNotify('Proposition de nulle refusée. La partie continue.');
         }
       } else if (msg.type === 'game:opponent_resigned') {
-        const oppSide = msg.resignedSide === 'white' ? 'black' : 'white';
-        setGameState((prev) =>
-          prev
-            ? {
-                ...prev,
-                winner: oppSide,
-                endReason: 'Votre adversaire a abandonné la partie.',
+        const resignedSide = parsePlayerSide(msg.resignedSide, 'black');
+        const reasonText =
+          typeof msg.reason === 'string' && msg.reason
+            ? msg.reason
+            : `Abandon des ${SIDE_LABELS[resignedSide]}.`;
+        setDisconnectedOpponents((prev) => prev.filter((d) => d.side !== resignedSide));
+        setGameState((prev) => {
+          if (!prev || prev.winner) return prev;
+          const next = cloneGameState(prev);
+          const rules = next.compiledRules;
+          if (!next.eliminatedSides.includes(resignedSide)) {
+            next.eliminatedSides.push(resignedSide);
+          }
+          if (rules?.teamSharedElimination) {
+            for (const ally of getTeamSides(rules, resignedSide)) {
+              if (next.activeSides.includes(ally) && !next.eliminatedSides.includes(ally)) {
+                next.eliminatedSides.push(ally);
               }
-            : prev
-        );
+            }
+          }
+          const remainingGroups = getRemainingTeamGroups(rules, next.activeSides, next.eliminatedSides);
+          if (remainingGroups.length <= 1) {
+            const winGroup = remainingGroups[0];
+            next.winner = winGroup ? winGroup[0] : 'draw';
+            next.winningTeam = winGroup && winGroup.length > 1 ? winGroup : null;
+            next.endReason = reasonText;
+            return next;
+          }
+          if (next.eliminatedSides.includes(getCurrentTurnSide(next))) {
+            let nxt = (next.turnIndex + 1) % next.activeSides.length;
+            let guard = 0;
+            while (
+              next.eliminatedSides.includes(next.activeSides[nxt]) &&
+              guard < next.activeSides.length
+            ) {
+              nxt = (nxt + 1) % next.activeSides.length;
+              guard++;
+            }
+            next.turnIndex = nxt;
+          }
+          return next;
+        });
+      } else if (msg.type === 'game:timeout') {
+        const timedOutSide = parsePlayerSide(msg.timedOutSide, 'white');
+        setGameState((prev) => {
+          if (!prev || prev.winner) return prev;
+          const next = cloneGameState(prev);
+          const rules = next.compiledRules;
+          if (!next.eliminatedSides.includes(timedOutSide)) {
+            next.eliminatedSides.push(timedOutSide);
+          }
+          if (rules?.teamSharedElimination) {
+            for (const ally of getTeamSides(rules, timedOutSide)) {
+              if (next.activeSides.includes(ally) && !next.eliminatedSides.includes(ally)) {
+                next.eliminatedSides.push(ally);
+              }
+            }
+          }
+          const remainingGroups = getRemainingTeamGroups(rules, next.activeSides, next.eliminatedSides);
+          if (remainingGroups.length <= 1) {
+            const winGroup = remainingGroups[0];
+            next.winner = winGroup ? winGroup[0] : 'draw';
+            next.winningTeam = winGroup && winGroup.length > 1 ? winGroup : null;
+            next.endReason = `Temps écoulé pour les ${SIDE_LABELS[timedOutSide]}.`;
+            return next;
+          }
+          if (next.eliminatedSides.includes(getCurrentTurnSide(next))) {
+            let nxt = (next.turnIndex + 1) % next.activeSides.length;
+            let guard = 0;
+            while (
+              next.eliminatedSides.includes(next.activeSides[nxt]) &&
+              guard < next.activeSides.length
+            ) {
+              nxt = (nxt + 1) % next.activeSides.length;
+              guard++;
+            }
+            next.turnIndex = nxt;
+          }
+          return next;
+        });
       } else if (msg.type === 'game:opponent_disconnected') {
-        onNotify('Adversaire déconnecté de la salle.');
+        onNotify('Un joueur s’est déconnecté de la salle.');
       }
     };
 
@@ -438,12 +1247,12 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     return () => {
       onlineWs.removeEventListener('message', onMessage);
     };
-  }, [onlineWs, customPieces]);
+  }, [onlineWs, customPieces, profile.id, profile.nickname, profile.eol, settings.sound, settings.volume]);
 
   const openWsConnection = (): Promise<WebSocket> => {
     return new Promise((resolve, reject) => {
-      if (onlineWs && onlineWs.readyState === WebSocket.OPEN) {
-        resolve(onlineWs);
+      if (onlineWsRef.current && onlineWsRef.current.readyState === WebSocket.OPEN) {
+        resolve(onlineWsRef.current);
         return;
       }
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -456,8 +1265,93 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     });
   };
 
+  // Auto-reconnect to saved online game if user returns within 5 minutes (reload or app switch)
+  useEffect(() => {
+    if (attemptedSessionResumeRef.current || autoMatchedRoom) return;
+    attemptedSessionResumeRef.current = true;
+    const saved = loadActiveOnlineSession();
+    if (!saved || saved.userId !== profile.id) return;
+
+    void openWsConnection()
+      .then((ws) => {
+        ws.send(
+          JSON.stringify({
+            type: 'room:reconnect',
+            roomId: saved.roomId,
+            code: saved.code,
+            userId: saved.userId,
+          })
+        );
+      })
+      .catch(() => {});
+  }, [autoMatchedRoom, profile.id]);
+
+  // Also reconnect seamlessly when tab returns to foreground during active online match
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (mode !== 'online' || phase !== 'playing' || !onlineRoomId) return;
+      const ws = onlineWsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        void openWsConnection()
+          .then((freshWs) => {
+            freshWs.send(
+              JSON.stringify({
+                type: 'room:reconnect',
+                roomId: onlineRoomId,
+                code: onlineCode,
+                userId: profile.id,
+              })
+            );
+          })
+          .catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, [mode, phase, onlineRoomId, onlineCode, profile.id]);
+
+  const handleStartOnlineMatchmaking = async () => {
+    if (!activeVariant) return;
+    setMatchmakingActive(true);
+    setMatchmakingCountdown(10);
+    setWaitingRoomCode(null);
+    try {
+      const ws = await openWsConnection();
+      ws.send(
+        JSON.stringify({
+          type: 'matchmaking:join',
+          userId: profile.id,
+          nickname: profile.nickname || 'Joueur',
+          eol: profile.eol,
+          mode: 'specific',
+          competitive: lobbyCompetitive,
+          variantId: activeVariant.id,
+          variantSnapshot: activeVariant,
+          theme: {
+            boardTexture: settings.boardTexture,
+            boardLight: settings.boardLight,
+            boardDark: settings.boardDark,
+          },
+        })
+      );
+    } catch {
+      setMatchmakingActive(false);
+      onNotify('Serveur multijoueur indisponible — lancement contre l’IA.');
+      startGame('ai', recommendedAiLevel);
+    }
+  };
+
+  const handleCancelMatchmaking = () => {
+    setMatchmakingActive(false);
+    if (onlineWs && onlineWs.readyState === WebSocket.OPEN) {
+      onlineWs.send(JSON.stringify({ type: 'matchmaking:leave' }));
+    }
+  };
+
   const handleCreateOnlineRoom = async () => {
     if (!activeVariant) return;
+    setMatchmakingActive(false);
     try {
       const ws = await openWsConnection();
       ws.send(
@@ -466,6 +1360,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
           userId: profile.id,
           nickname: profile.nickname || 'Joueur',
           eol: profile.eol,
+          competitive: lobbyCompetitive,
           variant: activeVariant,
           theme: {
             boardTexture: settings.boardTexture,
@@ -479,17 +1374,19 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     }
   };
 
-  const handleJoinOnlineRoom = async () => {
-    if (!joinCodeInput.trim()) {
+  const joinRoomByCode = async (rawCode: string) => {
+    const clean = rawCode.trim().toUpperCase();
+    if (!clean) {
       onNotify('Entrez un code de salle.');
       return;
     }
+    setMatchmakingActive(false);
     try {
       const ws = await openWsConnection();
       ws.send(
         JSON.stringify({
           type: 'room:join',
-          code: joinCodeInput.trim().toUpperCase(),
+          code: clean,
           userId: profile.id,
           nickname: profile.nickname || 'Joueur',
           eol: profile.eol,
@@ -505,6 +1402,50 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     }
   };
 
+  const handleJoinOnlineRoom = async () => {
+    await joinRoomByCode(joinCodeInput);
+  };
+
+  const handleLaunchRoomWithAi = () => {
+    if (!onlineWs || onlineWs.readyState !== WebSocket.OPEN || !onlineRoomId) return;
+    onlineWs.send(
+      JSON.stringify({
+        type: 'room:start_with_ai',
+        roomId: onlineRoomId,
+        aiLevels: fillerAiLevels,
+      })
+    );
+  };
+
+  // Auto-join friend invite URL (?room=CODE) once on landing in Play lobby
+  useEffect(() => {
+    const code = initialJoinRoomCode.trim().toUpperCase();
+    if (
+      code &&
+      phase === 'lobby' &&
+      !waitingRoomCode &&
+      !autoMatchedRoom &&
+      autoJoinedUrlCodeRef.current !== code
+    ) {
+      autoJoinedUrlCodeRef.current = code;
+      void joinRoomByCode(code);
+    }
+  }, [initialJoinRoomCode, phase, waitingRoomCode, autoMatchedRoom]);
+
+  const copyFriendInvite = async (kind: 'code' | 'link', code: string) => {
+    const text =
+      kind === 'code'
+        ? code
+        : `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(code)}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedHint(kind);
+      setTimeout(() => setCopiedHint((prev) => (prev === kind ? null : prev)), 2000);
+    } catch {
+      onNotify(`Code à partager : ${text}`);
+    }
+  };
+
   const legalMovesForSelected = useMemo(() => {
     if (!gameState || selectedSquare === null || mode === 'analysis') return [];
     return getLegalMovesForSquare(gameState, selectedSquare, true);
@@ -517,7 +1458,27 @@ export const GamePlay: React.FC<GamePlayProps> = ({
 
   const executePlayerMove = (move: LegalMove) => {
     if (!gameState || gameState.winner) return;
+    const movingSide = getCurrentTurnSide(gameState);
+    if (mode === 'ai' || mode === 'local') {
+      setUndoStack((prev) => [...prev, cloneGameState(gameState)]);
+      setUndoMovesLenStack((prev) => [...prev, recordedMoves.length]);
+    }
     const next = applyMove(gameState, move);
+    const turnFinished = next.turnIndex !== gameState.turnIndex;
+    const incSec = next.variant.incrementSec || 0;
+    if (
+      turnFinished &&
+      !next.winner &&
+      (next.variant.duration || 0) > 0 &&
+      incSec > 0
+    ) {
+      setClocks((prev) => ({
+        ...prev,
+        [movingSide]: (prev[movingSide] || 0) + incSec,
+      }));
+    }
+
+    setRecordedMoves((prev) => [...prev, toReplayMove(move)]);
     setGameState(next);
     setSelectedSquare(null);
 
@@ -537,15 +1498,61 @@ export const GamePlay: React.FC<GamePlayProps> = ({
           type: 'game:move',
           roomId: onlineRoomId,
           move,
+          turnFinished,
+          nextTurnSide: getCurrentTurnSide(next),
+          eliminatedSides: next.eliminatedSides,
+          winner: next.winner,
         })
       );
     }
   };
 
+  const canUndo =
+    (mode === 'ai' || mode === 'local') &&
+    phase === 'playing' &&
+    Boolean(gameState && !gameState.winner) &&
+    (mode === 'local'
+      ? undoStack.length > 0
+      : undoStack.some((s) => getCurrentTurnSide(s) === myPlayerSide));
+
+  const handleUndo = () => {
+    if (mode === 'online' || mode === 'analysis' || !gameState || gameState.winner) return;
+    if (undoStack.length === 0) return;
+
+    if (mode === 'local') {
+      const target = undoStack[undoStack.length - 1];
+      const len = undoMovesLenStack[undoMovesLenStack.length - 1] ?? Math.max(0, recordedMoves.length - 1);
+      setUndoStack((prev) => prev.slice(0, -1));
+      setUndoMovesLenStack((prev) => prev.slice(0, -1));
+      setRecordedMoves((prev) => prev.slice(0, len));
+      setGameState(target);
+      setSelectedSquare(null);
+      onNotify('Dernier coup annulé.');
+      return;
+    }
+
+    let targetIdx = -1;
+    for (let i = undoStack.length - 1; i >= 0; i--) {
+      if (getCurrentTurnSide(undoStack[i]) === myPlayerSide) {
+        targetIdx = i;
+        break;
+      }
+    }
+    if (targetIdx === -1) return;
+    const restored = undoStack[targetIdx];
+    const targetMovesLen = undoMovesLenStack[targetIdx] ?? 0;
+    setAiThinking(false);
+    setUndoStack(undoStack.slice(0, targetIdx));
+    setUndoMovesLenStack(undoMovesLenStack.slice(0, targetIdx));
+    setRecordedMoves((prev) => prev.slice(0, targetMovesLen));
+    setGameState(restored);
+    setSelectedSquare(null);
+    onNotify('Votre dernier coup a été annulé.');
+  };
+
   const handleBoardClick = (index: number) => {
     if (!gameState) return;
 
-    // Free Analysis mode: free placement and movement without turn restrictions
     if (mode === 'analysis') {
       if (
         gameState.board.cells[index] === 0 ||
@@ -594,10 +1601,10 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     if (gameState.winner || aiThinking) return;
 
     const currentTurn = getCurrentTurnSide(gameState);
-    if (mode === 'ai' && currentTurn !== 'white') return;
+    if (mode === 'ai' && currentTurn !== myPlayerSide) return;
+    if (mode === 'local' && aiSides.includes(currentTurn)) return;
     if (mode === 'online' && currentTurn !== myOnlineSide) return;
 
-    // Check if clicking a legal move destination
     if (selectedSquare !== null) {
       const matched = legalMovesForSelected.find((m) => m.to === index);
       if (matched) {
@@ -606,7 +1613,6 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       }
     }
 
-    // Select own piece
     const clickedPiece = gameState.pieces[index];
     if (clickedPiece && clickedPiece.side === currentTurn) {
       if (clickedPiece.frozenTurns > 0) {
@@ -625,26 +1631,62 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     }
   };
 
-  // Resign & Draw actions
   const confirmResign = () => {
     if (!gameState || gameState.winner) return;
     setShowResignConfirm(false);
+    const rules = gameState.compiledRules;
     const resigningSide: PlayerSide =
-      mode === 'online' ? myOnlineSide : getCurrentTurnSide(gameState);
-    const otherSide =
-      gameState.activeSides.find(
-        (s) => s !== resigningSide && !gameState.eliminatedSides.includes(s)
-      ) || 'black';
+      mode === 'online'
+        ? myOnlineSide
+        : mode === 'ai'
+          ? myPlayerSide
+          : getCurrentTurnSide(gameState);
 
     if (mode === 'online' && onlineWs && onlineRoomId) {
       onlineWs.send(JSON.stringify({ type: 'game:resign', roomId: onlineRoomId }));
+      clearActiveOnlineSession();
     }
 
-    setGameState({
-      ...gameState,
-      winner: otherSide,
-      endReason: `Abandon des ${SIDE_LABELS[resigningSide]}.`,
-    });
+    const next = cloneGameState(gameState);
+    if (!next.eliminatedSides.includes(resigningSide)) {
+      next.eliminatedSides.push(resigningSide);
+    }
+    if (rules?.teamSharedElimination || mode === 'online' || mode === 'ai') {
+      for (const ally of getTeamSides(rules, resigningSide)) {
+        if (next.activeSides.includes(ally) && !next.eliminatedSides.includes(ally)) {
+          next.eliminatedSides.push(ally);
+        }
+      }
+    }
+
+    const remainingGroups = getRemainingTeamGroups(rules, next.activeSides, next.eliminatedSides);
+    const enemyGroup = remainingGroups.find((g) => !areSidesAllied(rules, g[0], resigningSide)) || remainingGroups[0];
+
+    if (remainingGroups.length <= 1 || mode === 'online' || mode === 'ai') {
+      const winGroup = enemyGroup || [];
+      const otherSide =
+        winGroup[0] ||
+        next.activeSides.find((s) => !areSidesAllied(rules, s, resigningSide)) ||
+        (resigningSide === 'white' ? 'black' : 'white');
+      setGameState({
+        ...next,
+        winner: otherSide,
+        winningTeam: winGroup.length > 1 ? winGroup : null,
+        endReason: `Abandon des ${SIDE_LABELS[resigningSide]}.`,
+      });
+    } else {
+      let nxt = (next.turnIndex + 1) % next.activeSides.length;
+      let guard = 0;
+      while (
+        next.eliminatedSides.includes(next.activeSides[nxt]) &&
+        guard < next.activeSides.length
+      ) {
+        nxt = (nxt + 1) % next.activeSides.length;
+        guard++;
+      }
+      next.turnIndex = nxt;
+      setGameState(next);
+    }
   };
 
   const handleOfferDraw = () => {
@@ -655,7 +1697,6 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     } else if (mode === 'local') {
       setPendingDrawOffer('local_prompt');
     } else if (mode === 'ai') {
-      // AI accepts draw only if game has >= 20 half-moves and material is roughly equal
       if (gameState.moveHistory.length >= 20) {
         setGameState({
           ...gameState,
@@ -690,28 +1731,22 @@ export const GamePlay: React.FC<GamePlayProps> = ({
   const handleSaveAnalysis = () => {
     if (!gameState) return;
     onFinishGame({
-      id: `ana_${crypto.randomUUID().slice(0, 10)}`,
+      id: `ana_${safeUuid().slice(0, 10)}`,
       type: 'Analyse sauvegardée',
       mode: 'analysis',
       variantId: gameState.variant.id,
       variantName: gameState.variant.name,
+      variantSnapshot: gameState.variant,
       creatorName: gameState.variant.creator,
       opponentName: 'Analyse libre',
       result: 'saved',
       movesCount: gameState.moveHistory.length,
+      replayMoves: recordedMoves,
       date: new Date().toISOString(),
       userRating: userRatings[gameState.variant.id],
     });
     onNotify('Position d’analyse enregistrée dans l’historique.');
   };
-
-  if (!activeVariant) {
-    return (
-      <div className="p-6 rounded-2xl border border-slate-800 bg-[#151c27] text-center">
-        <p className="text-slate-400">Aucune variante disponible. Créez-en une d’abord !</p>
-      </div>
-    );
-  }
 
   const inCheckSquares = useMemo(() => {
     if (!gameState) return [];
@@ -727,8 +1762,327 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     return arr;
   }, [gameState, customPieces]);
 
+  if (!activeVariant) {
+    return (
+      <div className="p-6 rounded-2xl border border-slate-800 bg-[#151c27] text-center">
+        <p className="text-slate-400">Aucune variante disponible. Créez-en une d’abord !</p>
+      </div>
+    );
+  }
+
   const currentTurnSide = gameState ? getCurrentTurnSide(gameState) : 'white';
   const currentRating = userRatings[activeVariant.id] || 0;
+  const effectiveMySide: PlayerSide = mode === 'online' ? myOnlineSide : myPlayerSide;
+  const opponentSide: PlayerSide =
+    gameState?.activeSides.find(
+      (s) => s !== effectiveMySide && !gameState.eliminatedSides.includes(s)
+    ) ||
+    gameState?.activeSides.find((s) => s !== effectiveMySide) ||
+    (effectiveMySide === 'black' ? 'white' : 'black');
+
+  const isMyTurn =
+    phase === 'playing' &&
+    Boolean(gameState && !gameState.winner) &&
+    mode !== 'analysis' &&
+    (mode === 'local' ? !aiSides.includes(currentTurnSide) : currentTurnSide === effectiveMySide);
+
+  const isOpponentTurn =
+    phase === 'playing' && Boolean(gameState && !gameState.winner) && mode !== 'analysis' && !isMyTurn;
+
+  const endOutcome: 'win' | 'loss' | 'draw' | null =
+    phase === 'ended' && gameState?.winner && mode !== 'analysis'
+      ? gameState.winner === 'draw'
+        ? 'draw'
+        : areSidesAllied(gameState.compiledRules, gameState.winner, effectiveMySide)
+          ? 'win'
+          : 'loss'
+      : null;
+
+  const endHeadline =
+    endOutcome && gameState
+      ? `Vous avez ${
+          endOutcome === 'win'
+            ? 'gagné'
+            : endOutcome === 'loss'
+              ? 'perdu'
+              : 'fait nul'
+        } par ${formatEndCondition(gameState)}`
+      : '';
+
+  const describeSideSeat = (side: PlayerSide): string => {
+    if (mode === 'analysis') return SIDE_LABELS[side];
+    if (side === effectiveMySide && mode !== 'local') {
+      return `${profile.nickname || 'Vous'} (${SIDE_LABELS[side]})`;
+    }
+    if (mode === 'online') {
+      const hum = onlineParticipants.find((p) => p.side === side);
+      if (hum) {
+        return hum.userId === profile.id
+          ? `${hum.nickname} · Vous (${SIDE_LABELS[side]})`
+          : `${hum.nickname} (${hum.eol} ÉOL · ${SIDE_LABELS[side]})`;
+      }
+      const bot = onlineAiSeats.find((a) => a.side === side);
+      if (bot) return `IA Niv.${bot.level} (~${bot.approxEol} ÉOL · ${SIDE_LABELS[side]})`;
+      return `${onlineOpponent?.nickname || 'Adversaire'} (${SIDE_LABELS[side]})`;
+    }
+    if (aiSides.includes(side)) {
+      const lvl = aiLevelsBySide[side] || aiLevel;
+      const meta = AI_LEVELS.find((l) => l.level === lvl) || AI_LEVELS[2];
+      return `IA Niv.${lvl} (~${meta.approxEol} ÉOL · ${SIDE_LABELS[side]})`;
+    }
+    if (side === myPlayerSide) {
+      return `${profile.nickname || 'Joueur 1'} (${SIDE_LABELS[side]})`;
+    }
+    return `Humain local (${SIDE_LABELS[side]})`;
+  };
+
+  const opponentLabel =
+    mode === 'analysis'
+      ? 'Analyse libre'
+      : (gameState?.activeSides.length || 2) > 2
+        ? `${gameState?.activeSides.length} joueurs · Actif : ${describeSideSeat(currentTurnSide)}`
+        : describeSideSeat(opponentSide);
+
+  const hasClock = Boolean(gameState && gameState.variant.duration > 0 && mode !== 'analysis');
+  const topClockSide =
+    (gameState?.activeSides.length || 2) > 2 && currentTurnSide !== effectiveMySide
+      ? currentTurnSide
+      : opponentSide;
+
+  const renderClockBadge = (side: PlayerSide, isTicking: boolean, large = false) => {
+    if (!gameState || mode === 'analysis') return null;
+    if (!hasClock) {
+      return (
+        <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-lg bg-slate-900/70 border border-slate-700/70 text-slate-400 shrink-0 whitespace-nowrap">
+          <Clock className="w-3.5 h-3.5" />
+          <span>∞ Sans chrono</span>
+        </span>
+      );
+    }
+    const remaining = clocks[side];
+    const lowTime = remaining <= 30;
+    return (
+      <div
+        className={`inline-flex items-center gap-1.5 font-extrabold font-mono-num rounded-xl border shrink-0 whitespace-nowrap ${
+          large ? 'text-base sm:text-xl px-3 py-1.5' : 'text-sm sm:text-base px-2.5 py-1'
+        } ${
+          lowTime
+            ? 'border-rose-400 bg-rose-500/20 text-rose-200 animate-pulse'
+            : isTicking
+              ? 'border-emerald-400 bg-emerald-500/20 text-emerald-100 shadow-[0_0_12px_rgba(16,185,129,0.28)]'
+              : 'border-slate-700 bg-[#0d131d] text-slate-200'
+        }`}
+      >
+        <Clock className={large ? 'w-4 h-4 text-emerald-400' : 'w-3.5 h-3.5 text-slate-400'} />
+        <span>{formatClock(remaining)}</span>
+      </div>
+    );
+  };
+
+  const renderDisconnectBanner = () => {
+    if (mode !== 'online' || phase !== 'playing' || disconnectedOpponents.length === 0) {
+      return null;
+    }
+    return (
+      <div className="w-full max-w-6xl shrink-0 rounded-xl border border-amber-400/50 bg-amber-500/15 px-3.5 py-2 flex items-center justify-between gap-2 text-xs sm:text-sm text-amber-200">
+        <div className="flex items-center gap-2 min-w-0">
+          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span className="truncate">
+            {disconnectedOpponents
+              .map(
+                (d) =>
+                  `${d.nickname} a quitté l’application — Abandon automatique dans ${formatMinSec(d.remainingSec)}`
+              )
+              .join(' · ')}
+          </span>
+        </div>
+      </div>
+    );
+  };
+
+  const renderMultiPlayerStrip = (darkSurface: boolean) => {
+    if (!gameState || gameState.activeSides.length <= 2) return null;
+    const teams = gameState.compiledRules?.teams || [];
+    return (
+      <div className="w-full max-w-6xl flex items-center gap-1.5 shrink-0 overflow-x-auto flex-nowrap py-0.5">
+        {gameState.activeSides.map((s) => {
+          const eliminated = gameState.eliminatedSides.includes(s);
+          const active = currentTurnSide === s && !gameState.winner;
+          const teamIdx = teams.findIndex((g) => g.includes(s));
+          const isAllyToMe =
+            mode !== 'local' &&
+            s !== effectiveMySide &&
+            areSidesAllied(gameState.compiledRules, s, effectiveMySide);
+          return (
+            <div
+              key={s}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs shrink-0 whitespace-nowrap ${
+                eliminated
+                  ? 'opacity-45 border-slate-800 bg-slate-900/40 line-through'
+                  : active
+                    ? 'border-emerald-400 bg-emerald-500/15 text-emerald-100 font-semibold shadow-sm'
+                    : darkSurface
+                      ? 'border-slate-800 bg-[#121923] text-slate-300'
+                      : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              <span className={`w-2.5 h-2.5 rounded-full border shrink-0 ${SIDE_SWATCH[s]}`} />
+              {teamIdx >= 0 && (
+                <span className="px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[10px] font-bold">
+                  Éq.{teamIdx + 1}
+                  {isAllyToMe ? ' · Allié' : ''}
+                </span>
+              )}
+              <span className="truncate max-w-[145px]">{describeSideSeat(s)}</span>
+              {hasClock && (
+                <span className="font-mono-num font-bold opacity-90">
+                  · {formatClock(clocks[s])}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderSidePicker = () => (
+    <div className="space-y-1.5">
+      <span className="text-xs font-medium text-slate-500 dark:text-slate-400 block">
+        Votre couleur (pour s’entraîner ou aléatoire)
+      </span>
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => setPreferredSide('random')}
+          className={`px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors min-h-[36px] ${
+            preferredSide === 'random'
+              ? 'border-sky-500 bg-sky-500/20 text-sky-400'
+              : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] text-slate-600 dark:text-slate-300'
+          }`}
+        >
+          Aléatoire
+        </button>
+        {lobbyAvailableSides.map((s) => (
+          <button
+            key={s}
+            type="button"
+            onClick={() => setPreferredSide(s)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-colors min-h-[36px] ${
+              preferredSide === s
+                ? 'border-sky-500 bg-sky-500/20 text-sky-400'
+                : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <span className={`w-2.5 h-2.5 rounded-full border ${SIDE_SWATCH[s]}`} />
+            <span>{SIDE_LABELS[s]}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  const renderBoardHidingOverlay = () => {
+    if (!endOutcome || !gameState) return null;
+    return (
+      <div className="absolute inset-0 z-30 rounded-xl bg-slate-950/95 backdrop-blur-md flex flex-col items-center justify-center p-5 sm:p-8 text-center space-y-4">
+        <div
+          className={`w-14 h-14 rounded-2xl flex items-center justify-center border ${
+            endOutcome === 'win'
+              ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
+              : endOutcome === 'loss'
+                ? 'bg-rose-500/20 border-rose-400/50 text-rose-300'
+                : 'bg-amber-500/20 border-amber-400/50 text-amber-300'
+          }`}
+        >
+          <Trophy className="w-7 h-7" />
+        </div>
+        <div className="space-y-1.5 max-w-md">
+          <div className="text-xs uppercase tracking-wider font-semibold text-sky-400">
+            Fin de partie · {activeCompetitive ? 'Compétitif (ÉOL)' : 'Amical (sans ÉOL)'}
+          </div>
+          <h2 className="text-xl sm:text-2xl font-bold text-white leading-snug">
+            {endHeadline}
+          </h2>
+          <p className="text-xs sm:text-sm text-slate-300">
+            {gameState.winner === 'draw'
+              ? 'Match nul'
+              : gameState.winningTeam && gameState.winningTeam.length > 1
+                ? `Victoire de l’équipe ${formatTeamLabel(gameState.winningTeam)}`
+                : `Victoire des ${SIDE_LABELS[gameState.winner as PlayerSide]}`}
+            {gameState.endReason ? ` — ${gameState.endReason}` : ''}
+          </p>
+        </div>
+
+        {activeCompetitive && lastEolBreakdown && (
+          <div className="px-4 py-2 rounded-xl border border-slate-700 bg-slate-900/90 text-xs sm:text-sm">
+            {lastEolBreakdown.counted ? (
+              <span className="font-semibold">
+                ÉOL :{' '}
+                <span
+                  className={`font-mono-num ${
+                    lastEolBreakdown.delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                  }`}
+                >
+                  {lastEolBreakdown.delta >= 0 ? '+' : ''}
+                  {lastEolBreakdown.delta} ({lastEolBreakdown.playerEolBefore} →{' '}
+                  {lastEolBreakdown.playerEolAfter})
+                </span>
+                {lastEolBreakdown.modeMultiplier !== undefined &&
+                  lastEolBreakdown.modeMultiplier < 1 && (
+                    <span className="text-slate-400"> · ×0.50 (IA / Local)</span>
+                  )}
+              </span>
+            ) : (
+              <span className="text-amber-300">{lastEolBreakdown.reasonIfUncounted}</span>
+            )}
+          </div>
+        )}
+        {!activeCompetitive && (
+          <div className="px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-slate-300">
+            Partie amicale — aucun point ÉOL en jeu
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+          {mode !== 'online' && (
+            <button
+              type="button"
+              onClick={() => startGame(mode)}
+              className="px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-sm min-h-[44px]"
+            >
+              Rejouer
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setIsFullscreen(false);
+              setPhase('lobby');
+              clearActiveOnlineSession();
+              onClearOnlineRoom?.();
+            }}
+            className="px-4 py-2.5 rounded-xl border border-slate-600 hover:border-slate-400 text-slate-100 font-semibold text-sm min-h-[44px]"
+          >
+            Menu jeu
+          </button>
+          {isFullscreen && (
+            <button
+              type="button"
+              onClick={() => setIsFullscreen(false)}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl border border-slate-600 hover:border-sky-400 text-slate-200 font-semibold text-sm min-h-[44px]"
+            >
+              <Minimize2 className="w-4 h-4" />
+              <span>Diminuer l’écran</span>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const extraPlayersCount = Math.max(0, (activeVariant.players || 2) - 2);
+  const missingRoomSlots = Math.max(0, onlineTargetPlayers - onlineWaitingPlayers.length);
 
   return (
     <div className="space-y-5">
@@ -740,7 +2094,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               Jouer & Analyser
             </h1>
             <p className="text-sm text-slate-600 dark:text-slate-400">
-              Choisissez une variante, sélectionnez un mode de jeu et lancez la partie.
+              Choisissez une variante, votre couleur, le mode compétitif ou amical, puis lancez la partie.
             </p>
           </div>
 
@@ -760,11 +2114,50 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               >
                 {variants.map((v) => (
                   <option key={v.id} value={v.id}>
-                    {v.name} ({v.board.rows}×{v.board.cols} · {v.controlledDifficulty || v.difficulty})
+                    {v.name} ({v.board.rows}×{v.board.cols} · {v.players} joueurs · {v.controlledDifficulty || v.difficulty})
                   </option>
                 ))}
               </select>
             </label>
+
+            {/* Choix Compétitif vs Amical */}
+            <div className="space-y-1.5">
+              <span className="text-xs font-medium text-slate-500 dark:text-slate-400 block">
+                Enjeu de la partie
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setLobbyCompetitive(true)}
+                  className={`p-3 rounded-xl border text-left transition-all ${
+                    lobbyCompetitive
+                      ? 'border-sky-500 bg-sky-500/15 text-slate-900 dark:text-white'
+                      : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  <div className="text-sm font-semibold">Compétitif (ÉOL en jeu)</div>
+                  <div className="text-xs opacity-80 mt-0.5">
+                    En ligne : 100 % ÉOL · IA / Humain local : 50 % ÉOL
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLobbyCompetitive(false)}
+                  className={`p-3 rounded-xl border text-left transition-all ${
+                    !lobbyCompetitive
+                      ? 'border-emerald-500 bg-emerald-500/15 text-slate-900 dark:text-white'
+                      : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  <div className="text-sm font-semibold">Amical (sans ÉOL)</div>
+                  <div className="text-xs opacity-80 mt-0.5">
+                    Aucun point ÉOL gagné ni perdu — idéal pour s’entraîner
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {renderSidePicker()}
 
             <VariantRulesSummary
               variant={activeVariant}
@@ -775,113 +2168,372 @@ export const GamePlay: React.FC<GamePlayProps> = ({
           </div>
 
           {/* 4 cartes de modes de jeu */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* 1. Contre IA */}
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-5 space-y-3">
-              <div className="flex items-center gap-2.5">
-                <Bot className="w-5 h-5 text-sky-400" />
-                <h2 className="font-semibold text-slate-900 dark:text-slate-100">
-                  Jouer contre une IA
-                </h2>
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-5 flex flex-col justify-between space-y-3">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5">
+                    <Bot className="w-5 h-5 text-sky-400" />
+                    <h2 className="font-semibold text-slate-900 dark:text-slate-100">
+                      Jouer contre une IA
+                    </h2>
+                  </div>
+                  <span className="text-[11px] font-mono-num font-semibold text-sky-400">
+                    Votre ÉOL : {profile.eol}
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  L’IA la plus proche de votre niveau ({recommendedAiMeta.label}, ~{recommendedAiMeta.approxEol} ÉOL) est présélectionnée. Ouvertures variées et rythme humain.
+                </p>
+
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-slate-500 dark:text-slate-400">
+                      {extraPlayersCount > 0 ? 'IA 1 (adversaire principal)' : 'Difficulté de l’IA'}
+                    </span>
+                    {aiLevel !== recommendedAiLevel && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAiLevel(recommendedAiLevel);
+                          setAiLevelCustomPicked(false);
+                        }}
+                        className="text-sky-400 hover:underline font-medium"
+                      >
+                        Recommandé (Niv.{recommendedAiLevel})
+                      </button>
+                    )}
+                  </div>
+                  <select
+                    value={aiLevel}
+                    onChange={(e) => {
+                      setAiLevel(Number(e.target.value) as AiDifficultyLevel);
+                      setAiLevelCustomPicked(true);
+                    }}
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm"
+                  >
+                    {AI_LEVELS.map((l) => (
+                      <option key={l.level} value={l.level}>
+                        Niveau {l.level} — {l.label} (~{l.approxEol} ÉOL)
+                        {l.level === recommendedAiLevel ? ' ★ Recommandé' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {extraPlayersCount > 0 && (
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0f151f] border border-slate-200 dark:border-slate-800 space-y-2">
+                    <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      Niveaux des {extraPlayersCount} autre(s) IA ({activeVariant.players} joueurs)
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {Array.from({ length: extraPlayersCount }, (_, i) => {
+                        const seatIdx = i + 1;
+                        const cfg = multiSeatConfigs[seatIdx] || {
+                          kind: 'ai',
+                          aiLevel: recommendedAiLevel,
+                        };
+                        return (
+                          <label key={seatIdx} className="block space-y-1">
+                            <span className="text-[11px] text-slate-500">IA {i + 2}</span>
+                            <select
+                              value={cfg.aiLevel}
+                              onChange={(e) => {
+                                const val = Number(e.target.value) as AiDifficultyLevel;
+                                setMultiSeatConfigs((prev) =>
+                                  prev.map((item, idx) =>
+                                    idx === seatIdx ? { ...item, kind: 'ai', aiLevel: val } : item
+                                  )
+                                );
+                              }}
+                              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#151c27] px-2.5 py-1.5 text-xs"
+                            >
+                              {AI_LEVELS.map((l) => (
+                                <option key={l.level} value={l.level}>
+                                  Niv.{l.level} · {l.label} (~{l.approxEol} ÉOL)
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                {isStandardChessCompatible(activeVariant)
-                  ? 'Moteur Stockfish actif pour cette variante classique.'
-                  : 'Moteur IA Chess Lab adapté aux règles personnalisées de cette variante.'}
-              </p>
-              <label className="block space-y-1">
-                <span className="text-xs text-slate-500 dark:text-slate-400">
-                  Difficulté (10 niveaux)
-                </span>
-                <select
-                  value={aiLevel}
-                  onChange={(e) => setAiLevel(Number(e.target.value) as AiDifficultyLevel)}
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm"
-                >
-                  {AI_LEVELS.map((l) => (
-                    <option key={l.level} value={l.level}>
-                      Niveau {l.level} — {l.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+
               <button
                 type="button"
                 onClick={() => startGame('ai')}
                 className="w-full py-2.5 px-4 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-sm min-h-[44px]"
               >
-                Affronter l’IA (classé ÉOL)
+                {lobbyCompetitive
+                  ? `Affronter l’IA Niv.${aiLevel} (ÉOL −50 %)`
+                  : `Affronter l’IA Niv.${aiLevel} (amical)`}
               </button>
             </div>
 
             {/* 2. Contre un autre humain (local) */}
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-5 flex flex-col justify-between space-y-3">
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <div className="flex items-center gap-2.5">
                   <Users className="w-5 h-5 text-emerald-400" />
                   <h2 className="font-semibold text-slate-900 dark:text-slate-100">
-                    Jouer contre un autre humain
+                    Jouer contre un autre humain (local)
                   </h2>
                 </div>
                 <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Partie locale sur le même appareil pour 2 à {activeVariant.players} joueurs avec respect complet des tours, pouvoirs et horloges.
+                  Partie en face à face sur cet appareil pour 2 à {activeVariant.players} joueurs, avec votre choix de couleur, bouton Annuler et horloges.
                 </p>
+
+                {extraPlayersCount > 0 && (
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0f151f] border border-slate-200 dark:border-slate-800 space-y-2">
+                    <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      Places supplémentaires (Humain ou IA)
+                    </div>
+                    <div className="space-y-2">
+                      {Array.from({ length: extraPlayersCount }, (_, i) => {
+                        const seatIdx = i + 1;
+                        const cfg = multiSeatConfigs[seatIdx] || {
+                          kind: 'ai',
+                          aiLevel: recommendedAiLevel,
+                        };
+                        return (
+                          <div key={seatIdx} className="flex items-center gap-2">
+                            <span className="text-xs text-slate-500 w-16 shrink-0">
+                              Place {seatIdx + 2}
+                            </span>
+                            <select
+                              value={cfg.kind}
+                              onChange={(e) => {
+                                const k = e.target.value === 'human' ? 'human' : 'ai';
+                                setMultiSeatConfigs((prev) =>
+                                  prev.map((item, idx) =>
+                                    idx === seatIdx ? { ...item, kind: k } : item
+                                  )
+                                );
+                              }}
+                              className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#151c27] px-2 py-1.5 text-xs"
+                            >
+                              <option value="human">Humain local</option>
+                              <option value="ai">Compléter par IA</option>
+                            </select>
+                            {cfg.kind === 'ai' && (
+                              <select
+                                value={cfg.aiLevel}
+                                onChange={(e) => {
+                                  const val = Number(e.target.value) as AiDifficultyLevel;
+                                  setMultiSeatConfigs((prev) =>
+                                    prev.map((item, idx) =>
+                                      idx === seatIdx ? { ...item, aiLevel: val } : item
+                                    )
+                                  );
+                                }}
+                                className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#151c27] px-2 py-1.5 text-xs"
+                              >
+                                {AI_LEVELS.map((l) => (
+                                  <option key={l.level} value={l.level}>
+                                    Niv.{l.level} (~{l.approxEol} ÉOL)
+                                  </option>
+                                ))}
+                              </select>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
+
               <button
                 type="button"
                 onClick={() => startGame('local')}
                 className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-sm min-h-[44px]"
               >
-                Lancer partie locale
+                {lobbyCompetitive
+                  ? 'Lancer partie locale (ÉOL −50 %)'
+                  : 'Lancer partie locale (amicale)'}
               </button>
             </div>
 
             {/* 3. En ligne */}
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-5 space-y-3">
+            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-5 space-y-3.5">
               <div className="flex items-center gap-2.5">
                 <Globe className="w-5 h-5 text-violet-400" />
                 <h2 className="font-semibold text-slate-900 dark:text-slate-100">
-                  Jouer en ligne (salle privée)
+                  Jouer en ligne (Matchmaking ou Ami)
                 </h2>
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Créez un code de partie à partager ou rejoignez un ami en temps réel. Chacun conserve son propre thème de pièces.
-              </p>
 
-              {waitingRoomCode ? (
-                <div className="p-3 rounded-xl bg-violet-500/15 border border-violet-500/30 text-center space-y-1">
-                  <div className="text-xs text-violet-300">En attente d’un adversaire…</div>
-                  <div className="text-2xl font-bold font-mono-num tracking-widest text-white">
-                    {waitingRoomCode}
+              {matchmakingActive ? (
+                <div className="p-3.5 rounded-xl bg-sky-500/10 border border-sky-500/35 space-y-2.5">
+                  <div className="flex items-center justify-between text-xs font-semibold text-sky-300">
+                    <span>Recherche d’un adversaire ÉOL ≈ {profile.eol}…</span>
+                    <span className="font-mono-num text-sm">{matchmakingCountdown} s</span>
                   </div>
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <button
-                    type="button"
-                    onClick={handleCreateOnlineRoom}
-                    className="w-full py-2.5 px-4 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm min-h-[44px]"
-                  >
-                    Créer une salle en ligne
-                  </button>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={joinCodeInput}
-                      onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
-                      placeholder="Code (ex. AB12CD)"
-                      className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm font-mono-num uppercase"
+                  <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden">
+                    <div
+                      className="h-full bg-sky-400 transition-all duration-1000"
+                      style={{ width: `${(matchmakingCountdown / 10) * 100}%` }}
                     />
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+                    <span>
+                      {(activeVariant.players || 2) > 2
+                        ? 'Les places libres seront complétées par des IA après 10 s.'
+                        : `Si personne ne rejoint sous ${matchmakingCountdown} s, lancement contre l’IA Niv.${recommendedAiLevel}.`}
+                    </span>
                     <button
                       type="button"
-                      onClick={handleJoinOnlineRoom}
-                      className="px-4 py-2 rounded-lg border border-slate-300 dark:border-slate-700 text-sm font-medium min-h-[44px]"
+                      onClick={handleCancelMatchmaking}
+                      className="px-2.5 py-1 rounded-lg border border-slate-700 hover:border-slate-500 text-slate-200 shrink-0"
                     >
-                      Rejoindre
+                      Annuler
                     </button>
                   </div>
                 </div>
+              ) : (
+                !waitingRoomCode && (
+                  <button
+                    type="button"
+                    onClick={handleStartOnlineMatchmaking}
+                    className="w-full py-2.5 px-4 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-sm min-h-[44px]"
+                  >
+                    Matchmaking en ligne · délai max 10 s ({lobbyCompetitive ? '100 % ÉOL' : 'Amical'})
+                  </button>
+                )
               )}
+
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                  <strong className="text-violet-400">Jouer avec un ami :</strong> 1) Créez une salle pour obtenir un{' '}
+                  <strong>code à 6 caractères</strong> · 2) Envoyez-lui le code ou le <strong>lien direct</strong>. (5 min accordées en cas de déconnexion).
+                </div>
+
+                {waitingRoomCode ? (
+                  <div className="p-3.5 rounded-xl bg-violet-500/15 border border-violet-500/35 space-y-3">
+                    <div className="text-center space-y-1">
+                      <div className="text-xs text-violet-300 font-medium">
+                        En attente de joueurs ({onlineWaitingPlayers.length}/{onlineTargetPlayers})…
+                      </div>
+                      <div className="text-3xl font-extrabold font-mono-num tracking-[0.22em] text-white">
+                        {waitingRoomCode}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => copyFriendInvite('code', waitingRoomCode)}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-violet-400/40 bg-violet-500/20 hover:bg-violet-500/30 text-xs font-semibold text-white min-h-[38px]"
+                      >
+                        {copiedHint === 'code' ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                        <span>{copiedHint === 'code' ? 'Code copié !' : 'Copier le code'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => copyFriendInvite('link', waitingRoomCode)}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-sky-400/40 bg-sky-500/20 hover:bg-sky-500/30 text-xs font-semibold text-white min-h-[38px]"
+                      >
+                        {copiedHint === 'link' ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        ) : (
+                          <Link2 className="w-3.5 h-3.5" />
+                        )}
+                        <span>{copiedHint === 'link' ? 'Lien copié !' : 'Copier le lien'}</span>
+                      </button>
+                    </div>
+
+                    {onlineWaitingPlayers.length > 0 && (
+                      <div className="space-y-1">
+                        <div className="text-[11px] text-slate-300 font-medium">
+                          Joueurs déjà dans la salle :
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {onlineWaitingPlayers.map((p) => (
+                            <span
+                              key={p.userId}
+                              className="px-2 py-0.5 rounded-md bg-slate-900/80 border border-slate-700 text-xs text-slate-200"
+                            >
+                              {p.nickname} ({p.eol} ÉOL)
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {onlineTargetPlayers > 2 &&
+                      missingRoomSlots > 0 &&
+                      onlineHostUserId === profile.id && (
+                        <div className="pt-2 border-t border-violet-400/25 space-y-2">
+                          <div className="text-xs font-semibold text-amber-300">
+                            Il manque {missingRoomSlots} joueur(s) : complétez avec des IA
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                            {fillerAiLevels.map((lvl, idx) => (
+                              <select
+                                key={idx}
+                                value={lvl}
+                                onChange={(e) => {
+                                  const nextVal = Number(e.target.value) as AiDifficultyLevel;
+                                  setFillerAiLevels((prev) =>
+                                    prev.map((x, j) => (j === idx ? nextVal : x))
+                                  );
+                                }}
+                                className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-xs text-slate-100"
+                              >
+                                {AI_LEVELS.map((l) => (
+                                  <option key={l.level} value={l.level}>
+                                    IA {idx + 1} : Niv.{l.level} (~{l.approxEol} ÉOL)
+                                  </option>
+                                ))}
+                              </select>
+                            ))}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleLaunchRoomWithAi}
+                            className="w-full py-2 px-3 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-xs min-h-[38px]"
+                          >
+                            Lancer maintenant avec {missingRoomSlots} IA
+                          </button>
+                        </div>
+                      )}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={handleCreateOnlineRoom}
+                      className="w-full py-2.5 px-4 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-semibold text-sm min-h-[44px]"
+                    >
+                      Créer une salle privée pour un ami
+                    </button>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={joinCodeInput}
+                        onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
+                        placeholder="Collez le code reçu (ex. AB12CD)"
+                        className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm font-mono-num uppercase"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleJoinOnlineRoom}
+                        className="px-4 py-2 rounded-lg bg-violet-600/20 border border-violet-500/40 hover:bg-violet-600/30 text-violet-200 text-sm font-semibold min-h-[44px]"
+                      >
+                        Rejoindre
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* 4. Analyse libre */}
@@ -909,40 +2561,95 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         </div>
       )}
 
-      {/* Interface de partie active ou terminée */}
-      {phase !== 'lobby' && gameState && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Colonne Échiquier */}
-          <div className="lg:col-span-7 space-y-3">
-            {/* Bandeau adversaire */}
-            <div className="flex items-center justify-between px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27]">
-              <div>
-                <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  {mode === 'ai'
-                    ? `IA · ${AI_LEVELS.find((l) => l.level === aiLevel)?.label}`
-                    : mode === 'online'
-                      ? `${onlineOpponent?.nickname || 'Adversaire'} (${onlineOpponent?.eol || 400} ÉOL)`
-                      : mode === 'analysis'
-                        ? 'Analyse libre'
-                        : 'Joueur 2 (Noirs)'}
-                </div>
-                <div className="text-xs text-slate-500 dark:text-slate-400">
-                  {aiThinking
-                    ? 'Réflexion en cours…'
-                    : engineBadge
-                      ? `Moteur : ${engineBadge === 'stockfish' ? 'Stockfish' : 'Moteur Variantes'}`
-                      : gameState.variant.name}
-                </div>
-              </div>
-              {gameState.variant.duration > 0 && mode !== 'analysis' && (
-                <div className="text-base font-bold font-mono-num px-3 py-1 rounded-lg bg-slate-100 dark:bg-[#0f151f] text-slate-900 dark:text-slate-100">
-                  {formatClock(clocks[mode === 'online' && myOnlineSide === 'black' ? 'white' : 'black'])}
-                </div>
+      {/* Mode Grand écran : mise en page verrouillée (aucun saut lors de la sélection d'une pièce) */}
+      {phase !== 'lobby' && gameState && isFullscreen && (
+        <div
+          className="fixed inset-0 z-50 h-dvh w-screen bg-[#070b11] text-slate-100 flex flex-col items-center justify-between gap-2 p-2 sm:p-4 overflow-hidden overscroll-none"
+          style={{ overflowAnchor: 'none' }}
+        >
+          {/* Barre supérieure à hauteur fixe */}
+          <div
+            className={`w-full max-w-6xl h-14 shrink-0 flex items-center justify-between gap-2 px-3 rounded-2xl border overflow-x-auto flex-nowrap ${
+              isOpponentTurn
+                ? 'border-sky-400/70 bg-sky-500/10'
+                : 'border-slate-800 bg-[#121923]'
+            }`}
+          >
+            <div className="flex items-center gap-2 min-w-0 shrink">
+              <span className={`w-3 h-3 rounded-full border shrink-0 ${SIDE_SWATCH[topClockSide]}`} />
+              <span className="text-xs sm:text-sm font-semibold truncate">{opponentLabel}</span>
+              {renderClockBadge(topClockSide, isOpponentTurn)}
+              {aiThinking && (
+                <span className="text-xs font-semibold text-sky-300 whitespace-nowrap shrink-0">
+                  Réflexion…
+                </span>
               )}
             </div>
 
-            {/* Échiquier unifié */}
-            <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-[#0d121a] p-2 sm:p-3">
+            <div className="flex items-center gap-1.5 shrink-0">
+              {(mode === 'ai' || mode === 'local') && phase === 'playing' && (
+                <button
+                  type="button"
+                  onClick={handleUndo}
+                  disabled={!canUndo}
+                  className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs sm:text-sm min-h-[38px] disabled:opacity-40 whitespace-nowrap"
+                >
+                  <Undo2 className="w-4 h-4 text-sky-400" />
+                  <span>Annuler</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setShowRulesModal(true)}
+                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs sm:text-sm min-h-[38px] whitespace-nowrap"
+              >
+                <Info className="w-4 h-4 text-sky-400" />
+                <span>Règles</span>
+              </button>
+              {mode !== 'analysis' && phase === 'playing' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={handleOfferDraw}
+                    className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs sm:text-sm min-h-[38px] whitespace-nowrap"
+                  >
+                    <Handshake className="w-4 h-4 text-amber-400" />
+                    <span className="hidden sm:inline">Proposer nulle</span>
+                    <span className="sm:hidden">Nulle</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowResignConfirm(true)}
+                    className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-rose-500/40 bg-rose-500/15 text-rose-300 text-xs sm:text-sm min-h-[38px] whitespace-nowrap"
+                  >
+                    <Flag className="w-4 h-4" />
+                    <span className="hidden sm:inline">Abandonner</span>
+                  </button>
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsFullscreen(false)}
+                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs sm:text-sm min-h-[38px] whitespace-nowrap"
+              >
+                <Minimize2 className="w-4 h-4" />
+                <span>Diminuer l’écran</span>
+              </button>
+            </div>
+          </div>
+
+          {renderDisconnectBanner()}
+          {renderMultiPlayerStrip(true)}
+
+          {/* Zone centrale de l'échiquier */}
+          <div className="relative flex-1 w-full flex items-center justify-center min-h-0">
+            <div
+              className={`relative inline-flex items-center justify-center rounded-2xl border p-1.5 sm:p-2 transition-colors ${
+                isMyTurn
+                  ? 'border-emerald-400/70 bg-emerald-950/20 shadow-[0_0_28px_rgba(16,185,129,0.2)]'
+                  : 'border-slate-800 bg-[#0d121a]'
+              }`}
+            >
               <ChessBoard
                 board={gameState.board}
                 pieces={gameState.pieces}
@@ -961,41 +2668,210 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                 powerTargets={legalMovesForSelected.filter((m) => m.isPower).map((m) => m.to)}
                 lastMove={gameState.lastMove}
                 inCheckSquares={inCheckSquares}
-                viewerSide={
-                  mode === 'online' ? myOnlineSide : mode === 'ai' ? 'white' : null
-                }
+                viewerSide={mode === 'analysis' ? null : effectiveMySide}
+                fullscreen
+                isMyTurnHighlight={isMyTurn}
                 onCellClick={handleBoardClick}
               />
+              {renderBoardHidingOverlay()}
             </div>
 
-            {/* Bandeau joueur */}
-            <div className="flex items-center justify-between px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27]">
-              <div>
-                <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  {profile.nickname || 'Vous'} ({SIDE_LABELS[mode === 'online' ? myOnlineSide : 'white']})
-                </div>
-                <div className="text-xs text-slate-500 dark:text-slate-400">
-                  Tour actuel :{' '}
-                  <span className="font-semibold text-sky-400">
-                    {SIDE_LABELS[currentTurnSide]}
-                  </span>
-                  {gameState.actionsRemaining > 1 && ` · ${gameState.actionsRemaining} actions restantes`}
-                  {gameState.inCheckSides.includes(currentTurnSide) && (
-                    <span className="text-rose-400 font-semibold"> · ÉCHEC !</span>
-                  )}
-                </div>
-              </div>
-              {gameState.variant.duration > 0 && mode !== 'analysis' && (
-                <div className="text-base font-bold font-mono-num px-3 py-1 rounded-lg bg-slate-100 dark:bg-[#0f151f] text-slate-900 dark:text-slate-100">
-                  {formatClock(clocks[mode === 'online' ? myOnlineSide : 'white'])}
+            {/* Pouvoir spécial flottant pour ne jamais modifier la hauteur des barres */}
+            {selectedSquare !== null &&
+              powerMovesForSelected.some((pm) => pm.from === pm.to) && (
+                <div className="absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2">
+                  {powerMovesForSelected
+                    .filter((pm) => pm.from === pm.to)
+                    .map((pm, idx) => (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => executePlayerMove(pm)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold shadow-lg border border-violet-300/40"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>{pm.description}</span>
+                      </button>
+                    ))}
                 </div>
               )}
+          </div>
+
+          {/* Barre inférieure à hauteur fixe : indicateur visuel fort + pendule */}
+          <div
+            className={`w-full max-w-6xl h-14 sm:h-16 shrink-0 flex items-center justify-between gap-2 px-3.5 rounded-2xl border flex-nowrap ${
+              isMyTurn
+                ? 'border-emerald-400 bg-gradient-to-r from-emerald-500/20 via-emerald-500/10 to-[#121923] shadow-[0_0_24px_rgba(16,185,129,0.25)]'
+                : 'border-slate-800 bg-[#121923]'
+            }`}
+          >
+            <div className="flex items-center gap-2.5 min-w-0 flex-nowrap overflow-x-auto">
+              <span className={`w-3.5 h-3.5 rounded-full border shrink-0 ${SIDE_SWATCH[effectiveMySide]}`} />
+              <span className="text-sm sm:text-base font-bold text-white truncate">
+                {profile.nickname || 'Vous'} ({SIDE_LABELS[effectiveMySide]})
+              </span>
+
+              {isMyTurn && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-400 text-slate-950 font-extrabold text-xs tracking-wide uppercase shadow-sm shrink-0 whitespace-nowrap">
+                  <span>
+                    {mode === 'local' && currentTurnSide !== effectiveMySide
+                      ? `À VOUS : ${SIDE_LABELS[currentTurnSide]}`
+                      : 'À VOUS DE JOUER'}
+                  </span>
+                </span>
+              )}
+
+              {!isMyTurn && mode !== 'analysis' && phase === 'playing' && (
+                <span className="text-xs text-slate-400 shrink-0 whitespace-nowrap">
+                  Tour : <strong className="text-sky-300">{SIDE_LABELS[currentTurnSide]}</strong>
+                </span>
+              )}
+
+              {gameState.actionsRemaining > 1 && (
+                <span className="text-xs font-semibold text-amber-300 shrink-0 whitespace-nowrap">
+                  {gameState.actionsRemaining} actions
+                </span>
+              )}
+              {gameState.inCheckSides.includes(currentTurnSide) && (
+                <span className="px-2 py-0.5 rounded-md bg-rose-500/20 border border-rose-400/50 text-rose-300 text-xs font-bold shrink-0 whitespace-nowrap">
+                  ÉCHEC !
+                </span>
+              )}
+            </div>
+
+            {renderClockBadge(effectiveMySide, isMyTurn, true)}
+          </div>
+        </div>
+      )}
+
+      {/* Interface normale de partie active ou terminée */}
+      {phase !== 'lobby' && gameState && !isFullscreen && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          {/* Colonne Échiquier */}
+          <div className="lg:col-span-8 space-y-3">
+            {renderDisconnectBanner()}
+
+            {/* Barre du haut */}
+            <div
+              className={`flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 rounded-2xl border transition-colors ${
+                isOpponentTurn
+                  ? 'border-sky-400/70 bg-sky-500/10 dark:bg-sky-500/10 shadow-sm'
+                  : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27]'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className={`w-3 h-3 rounded-full border shrink-0 ${SIDE_SWATCH[topClockSide]}`} />
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 truncate">
+                    {opponentLabel}
+                  </div>
+                  <div className="text-xs text-slate-500 dark:text-slate-400">
+                    {aiThinking
+                      ? 'Réflexion en cours…'
+                      : engineBadge
+                        ? `Moteur : ${engineBadge === 'stockfish' ? 'Stockfish' : 'Moteur Variantes'}`
+                        : `${gameState.variant.name} · ${
+                            mode === 'analysis'
+                              ? 'Analyse'
+                              : activeCompetitive
+                                ? 'Compétitif'
+                                : 'Amical'
+                          }`}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {renderClockBadge(topClockSide, isOpponentTurn)}
+                <button
+                  type="button"
+                  onClick={() => setIsFullscreen(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 hover:border-sky-400 bg-slate-50 dark:bg-[#0f151f] text-xs font-semibold min-h-[38px]"
+                  title="Passer en grand écran"
+                >
+                  <Maximize2 className="w-4 h-4 text-sky-400" />
+                  <span>Grand écran</span>
+                </button>
+              </div>
+            </div>
+
+            {renderMultiPlayerStrip(false)}
+
+            {/* Échiquier unifié */}
+            <div
+              className={`relative rounded-2xl border p-2 sm:p-3 transition-colors ${
+                isMyTurn
+                  ? 'border-emerald-400/80 bg-emerald-500/5 dark:bg-emerald-950/15 shadow-[0_0_26px_rgba(16,185,129,0.18)]'
+                  : 'border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-[#0d121a]'
+              }`}
+            >
+              <ChessBoard
+                board={gameState.board}
+                pieces={gameState.pieces}
+                customPieces={[...customPieces, ...(gameState.variant.customPieceDefs || [])]}
+                settings={settings}
+                opponentThemeOverride={
+                  mode === 'online' && settings.showOpponentTheme ? onlineOpponent?.theme : null
+                }
+                selectedSquare={selectedSquare}
+                legalTargets={legalMovesForSelected
+                  .filter((m) => !m.isPower && m.captureIndex === undefined)
+                  .map((m) => m.to)}
+                captureTargets={legalMovesForSelected
+                  .filter((m) => m.captureIndex !== undefined)
+                  .map((m) => m.to)}
+                powerTargets={legalMovesForSelected.filter((m) => m.isPower).map((m) => m.to)}
+                lastMove={gameState.lastMove}
+                inCheckSquares={inCheckSquares}
+                viewerSide={mode === 'analysis' ? null : effectiveMySide}
+                isMyTurnHighlight={isMyTurn}
+                onCellClick={handleBoardClick}
+              />
+              {renderBoardHidingOverlay()}
+            </div>
+
+            {/* Bandeau joueur du bas */}
+            <div
+              className={`flex flex-wrap items-center justify-between gap-2 px-4 py-3 rounded-2xl border transition-colors ${
+                isMyTurn
+                  ? 'border-emerald-400 bg-gradient-to-r from-emerald-500/20 via-emerald-500/10 to-white dark:to-[#151c27] shadow-[0_0_22px_rgba(16,185,129,0.2)]'
+                  : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27]'
+              }`}
+            >
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className={`w-3.5 h-3.5 rounded-full border shrink-0 ${SIDE_SWATCH[effectiveMySide]}`} />
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-bold text-slate-900 dark:text-slate-100">
+                      {profile.nickname || 'Vous'} ({SIDE_LABELS[effectiveMySide]})
+                    </span>
+                    {isMyTurn && (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-400 text-slate-950 font-extrabold text-[11px] tracking-wide uppercase">
+                        <span>
+                          {mode === 'local' && currentTurnSide !== effectiveMySide
+                            ? `À VOUS : ${SIDE_LABELS[currentTurnSide]}`
+                            : 'À VOUS DE JOUER'}
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                    Tour actuel :{' '}
+                    <span className="font-semibold text-sky-400">
+                      {SIDE_LABELS[currentTurnSide]}
+                    </span>
+                    {gameState.actionsRemaining > 1 && ` · ${gameState.actionsRemaining} actions restantes`}
+                    {gameState.inCheckSides.includes(currentTurnSide) && (
+                      <span className="text-rose-400 font-semibold"> · ÉCHEC !</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {renderClockBadge(effectiveMySide, isMyTurn, true)}
             </div>
           </div>
 
-          {/* Colonne Contrôles, Pouvoirs & Historique des coups */}
-          <div className="lg:col-span-5 space-y-4">
-            {/* Pouvoirs spéciaux contextuels si une pièce sélectionnée en possède */}
+          {/* Colonne Contrôles */}
+          <div className="lg:col-span-4 space-y-4">
             {selectedSquare !== null && powerMovesForSelected.length > 0 && (
               <div className="rounded-2xl border border-violet-500/40 bg-violet-500/10 p-4 space-y-2.5">
                 <div className="flex items-center gap-2 text-sm font-semibold text-violet-300">
@@ -1024,7 +2900,6 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               </div>
             )}
 
-            {/* Outils d'Analyse Libre */}
             {mode === 'analysis' && (
               <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-4 space-y-3">
                 <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
@@ -1105,7 +2980,6 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               </div>
             )}
 
-            {/* Boutons d'actions de partie */}
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-4 space-y-3">
               <div className="flex flex-wrap gap-2">
                 <button
@@ -1116,6 +2990,18 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                   <Info className="w-4 h-4 text-sky-400" />
                   <span>Règles</span>
                 </button>
+
+                {(mode === 'ai' || mode === 'local') && phase === 'playing' && (
+                  <button
+                    type="button"
+                    onClick={handleUndo}
+                    disabled={!canUndo}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-sm min-h-[44px] disabled:opacity-40"
+                  >
+                    <Undo2 className="w-4 h-4 text-sky-400" />
+                    <span>Annuler</span>
+                  </button>
+                )}
 
                 {mode !== 'analysis' && phase === 'playing' && (
                   <>
@@ -1141,7 +3027,11 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    setIsFullscreen(false);
                     setPhase('lobby');
+                    if (mode !== 'online') {
+                      clearActiveOnlineSession();
+                    }
                     onClearOnlineRoom?.();
                   }}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-sm ml-auto min-h-[44px]"
@@ -1164,22 +3054,24 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               )}
             </div>
 
-            {/* Résultat de fin de partie + ÉOL + Note 5 étoiles */}
             {phase === 'ended' && (
               <div className="rounded-2xl border border-sky-500/40 bg-white dark:bg-[#151c27] p-5 space-y-4">
                 <div>
                   <div className="text-xs font-medium text-sky-400">Fin de partie</div>
                   <h2 className="text-xl font-bold text-slate-900 dark:text-slate-50 mt-0.5">
-                    {gameState.winner === 'draw'
-                      ? 'Match nul'
-                      : `Victoire des ${SIDE_LABELS[gameState.winner as PlayerSide]}`}
+                    {endHeadline ||
+                      (gameState.winner === 'draw'
+                        ? 'Match nul'
+                        : gameState.winningTeam && gameState.winningTeam.length > 1
+                          ? `Victoire de l’équipe ${formatTeamLabel(gameState.winningTeam)}`
+                          : `Victoire des ${SIDE_LABELS[gameState.winner as PlayerSide]}`)}
                   </h2>
                   <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
                     {gameState.endReason}
                   </p>
                 </div>
 
-                {lastEolBreakdown && (
+                {activeCompetitive && lastEolBreakdown && (
                   <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-[#0f151f] border border-slate-200 dark:border-slate-800 space-y-1.5 text-xs">
                     {lastEolBreakdown.counted ? (
                       <>
@@ -1198,6 +3090,9 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                         <div className="text-slate-500 dark:text-slate-400">
                           Base : {lastEolBreakdown.baseGain} · {lastEolBreakdown.familiarityLabel} · Difficulté{' '}
                           {lastEolBreakdown.difficultyLabel} (×{lastEolBreakdown.difficultyMultiplier.toFixed(2)})
+                          {lastEolBreakdown.modeMultiplier !== undefined &&
+                            lastEolBreakdown.modeMultiplier < 1 &&
+                            ` · Mode IA/Local ×${lastEolBreakdown.modeMultiplier.toFixed(2)} (−50 %)`}
                           {lastEolBreakdown.creatorMultiplier !== 1 &&
                             ` · Créateur ×${lastEolBreakdown.creatorMultiplier.toFixed(2)}`}
                           {lastEolBreakdown.discoveryLossProtectionApplied &&
@@ -1210,7 +3105,12 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                   </div>
                 )}
 
-                {/* Notation de la variante sur 5 étoiles */}
+                {!activeCompetitive && (
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-[#0f151f] border border-slate-200 dark:border-slate-800 text-xs text-slate-400">
+                    Partie amicale (sans ÉOL en jeu).
+                  </div>
+                )}
+
                 <div className="pt-2 border-t border-slate-200 dark:border-slate-800 space-y-2">
                   <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
                     Noter cette variante (1 note par joueur, modifiable dans l’Historique)
@@ -1256,7 +3156,6 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               </div>
             )}
 
-            {/* Liste des coups */}
             <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-4 space-y-2">
               <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                 <span className="font-semibold">Coups joués</span>
@@ -1281,9 +3180,35 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         </div>
       )}
 
-      {/* Confirmation d'abandon exacte */}
+      {/* Modale Règles en mode Grand écran */}
+      {isFullscreen && showRulesModal && gameState && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-2xl border border-slate-700 bg-[#151c27] p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-slate-50">Règles de {gameState.variant.name}</h3>
+              <button
+                type="button"
+                onClick={() => setShowRulesModal(false)}
+                className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800"
+                aria-label="Fermer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <VariantRulesSummary
+              variant={gameState.variant}
+              profile={profile}
+              customPieces={customPieces}
+              showEolPreview={false}
+              compact
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation d'abandon */}
       {showResignConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/65 backdrop-blur-sm p-4">
           <div className="w-full max-w-sm rounded-2xl border border-slate-700 bg-[#151c27] p-6 space-y-4 shadow-2xl">
             <h3 className="text-lg font-bold text-slate-50">
               Êtes-vous sûr de vouloir abandonner ?
@@ -1313,7 +3238,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
 
       {/* Modale proposition de nulle */}
       {pendingDrawOffer && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/65 backdrop-blur-sm p-4">
           <div className="w-full max-w-sm rounded-2xl border border-slate-700 bg-[#151c27] p-6 space-y-4 shadow-2xl">
             <h3 className="text-lg font-bold text-slate-50">Proposition de match nul</h3>
             <p className="text-sm text-slate-400">

@@ -1,7 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Compass,
-  Download,
   Hammer,
   History,
   Home,
@@ -19,6 +18,7 @@ import { PieceCreator } from './components/PieceCreator';
 import { SettingsView } from './components/SettingsView';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { TutorialModal } from './components/TutorialModal';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import {
   createEmptyDraftVariant,
@@ -38,7 +38,10 @@ import type {
   BoardConfig,
   GameMode,
   GameRecord,
+  OnlineAiSeat,
+  OnlineHumanSeat,
   PieceDef,
+  PlayerSide,
   Profile,
   SavedTheme,
   Variant,
@@ -51,36 +54,61 @@ import {
   publishVariantToFirestore,
   rateVariantInFirestore,
   recordGameInFirestore,
+  subscribePublicVariantsFromFirestore,
   syncUserProfileToFirestore,
 } from './utils/firestoreSync';
 import {
+  clearSessionNav,
   createBlankState,
+  fetchPublicVariants,
   fetchVariantById,
+  loadActiveOnlineSession,
   loadLocalState,
+  loadSessionNav,
   publishVariantToServer,
   rateVariantOnServer,
   recordGameOnServer,
   saveLocalState,
+  saveSessionNav,
   syncProfileToServer,
 } from './utils/storage';
 import {
   generateGuestNickname,
+  isContentFamilyFriendly,
   validateFamilyFriendlyText,
 } from './utils/moderation';
+import { safeUuid } from './utils/safeId';
 
 const AVATAR_SYMBOLS = ['♔', '♕', '♖', '♗', '♘', '★', '⚡', '✦'];
+const TUTORIAL_SEEN_KEY = 'chesslab_tutorial_v2_seen';
+const VALID_SCREENS: ScreenId[] = [
+  'home',
+  'create',
+  'pieces',
+  'discover',
+  'play',
+  'history',
+  'library',
+  'settings',
+];
 
 export default function App() {
   const [state, setState] = useState<AppState>(() => loadLocalState());
-  const [screen, setScreen] = useState<ScreenId>('home');
+  const [screen, setScreen] = useState<ScreenId>(() => {
+    const saved = loadSessionNav();
+    if (saved && VALID_SCREENS.includes(saved.screen as ScreenId)) {
+      return saved.screen as ScreenId;
+    }
+    return 'home';
+  });
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [showTutorial, setShowTutorial] = useState(false);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [dismissedInstallBanner, setDismissedInstallBanner] = useState(false);
   const {
     isInstallable: pwaInstallable,
     isInstalled: pwaInstalled,
     isInIframe: pwaInIframe,
-    install: triggerPwaInstall,
   } = usePWAInstall();
 
   // Onboarding first-run pseudo
@@ -88,30 +116,69 @@ export default function App() {
   const [onboardingSymbol, setOnboardingSymbol] = useState('♔');
   const [onboardingColor, setOnboardingColor] = useState('#7ebcff');
 
-  // Active editing/playing state
-  const [variantDraft, setVariantDraft] = useState<Variant>(() =>
-    createEmptyDraftVariant(loadLocalState().profile)
-  );
-  const [selectedPlayVariantId, setSelectedPlayVariantId] = useState<string | null>(
-    () => loadLocalState().variants[0]?.id || null
-  );
-  const [playInitialMode, setPlayInitialMode] = useState<GameMode>('ai');
+  // Active editing/playing state (restored across unexpected browser reloads/OS discards)
+  const [variantDraft, setVariantDraft] = useState<Variant>(() => {
+    const saved = loadSessionNav();
+    if (saved?.variantDraft && Array.isArray(saved.variantDraft.board?.cells)) {
+      return saved.variantDraft;
+    }
+    return createEmptyDraftVariant(loadLocalState().profile);
+  });
+  const [selectedPlayVariantId, setSelectedPlayVariantId] = useState<string | null>(() => {
+    const saved = loadSessionNav();
+    if (saved?.selectedPlayVariantId) return saved.selectedPlayVariantId;
+    return loadLocalState().variants[0]?.id || null;
+  });
+  const [playInitialMode, setPlayInitialMode] = useState<GameMode>(() => {
+    const saved = loadSessionNav();
+    return saved?.playInitialMode || 'ai';
+  });
+  const [playInitialCompetitive, setPlayInitialCompetitive] = useState<boolean>(() => {
+    const saved = loadSessionNav();
+    return saved ? saved.playInitialCompetitive : true;
+  });
+  const [initialJoinRoomCode, setInitialJoinRoomCode] = useState<string>('');
+  const [publicVariants, setPublicVariants] = useState<Variant[]>([]);
   const [matchedOnlineRoom, setMatchedOnlineRoom] = useState<{
     roomId: string;
     code: string;
-    yourSide: 'white' | 'black';
+    yourSide: PlayerSide;
+    competitive?: boolean;
     opponent: {
       userId: string;
       nickname: string;
       eol: number;
       theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
     };
+    participants?: OnlineHumanSeat[];
+    aiSeats?: OnlineAiSeat[];
+    hostUserId?: string;
     ws: WebSocket;
   } | null>(null);
 
   const notify = (msg: string) => {
     setToastMsg(msg);
   };
+
+  const scrollToPageTop = () => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+    requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    });
+  };
+
+  const navigateToScreen = (next: ScreenId) => {
+    setScreen(next);
+    scrollToPageTop();
+  };
+
+  useEffect(() => {
+    scrollToPageTop();
+  }, [screen, Boolean(state.profile.nickname)]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -124,13 +191,28 @@ export default function App() {
     saveLocalState(state);
   }, [state]);
 
-  // Sync theme dark/light & accent color
+  // Persist current navigation screen & active draft in sessionStorage against mobile OS reloads
+  useEffect(() => {
+    saveSessionNav({
+      screen,
+      selectedPlayVariantId,
+      playInitialMode,
+      playInitialCompetitive,
+      variantDraft,
+    });
+  }, [screen, selectedPlayVariantId, playInitialMode, playInitialCompetitive, variantDraft]);
+
+  // Sync theme dark/light & accent color (keep html/body background matched to prevent white flash)
   useEffect(() => {
     const root = document.documentElement;
     if (state.settings.theme === 'dark') {
       root.classList.add('dark');
+      root.style.backgroundColor = '#0d1118';
+      document.body.style.backgroundColor = '#0d1118';
     } else {
       root.classList.remove('dark');
+      root.style.backgroundColor = '#f8fafc';
+      document.body.style.backgroundColor = '#f8fafc';
     }
     root.style.setProperty('--accent-color', state.settings.accent || '#7ebcff');
   }, [state.settings.theme, state.settings.accent]);
@@ -174,18 +256,65 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // Sync profile to server on boot if already created + handle ?variant=<id> shared links
+  const mergePublicIntoList = (incoming: Variant[]) => {
+    if (!incoming.length) return;
+    setPublicVariants((prev) => {
+      const map = new Map<string, Variant>();
+      for (const v of prev) map.set(v.id, v);
+      for (const v of incoming) {
+        if (
+          v.visibility === 'public' &&
+          isContentFamilyFriendly(`${v.name} ${v.description || ''} ${v.rules || ''} ${v.creator || ''}`, true)
+        ) {
+          map.set(v.id, v);
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => (b.games || 0) - (a.games || 0));
+    });
+  };
+
+  // Sync profile + public variants globally (Firestore real-time + Express API) + ?variant=<id>
   useEffect(() => {
     if (state.profile.nickname) {
       syncProfileToServer(state.profile);
     }
+
+    // Re-publish locally authored public/link variants to the server on boot so Render restarts stay populated
+    for (const v of state.variants) {
+      if (
+        v.visibility !== 'private' &&
+        !v.id.startsWith('var_classic') &&
+        !v.id.startsWith('var_chaos') &&
+        !v.id.startsWith('var_mini6') &&
+        !v.id.startsWith('var_fortress')
+      ) {
+        void publishVariantToServer(v).catch(() => {});
+      }
+    }
+
+    void fetchPublicVariants('').then(mergePublicIntoList);
+
+    const unsubPublic = subscribePublicVariantsFromFirestore(
+      (cloudList) => mergePublicIntoList(cloudList),
+      (err) => console.warn('Public variants Firestore subscription:', err)
+    );
+
     const params = new URLSearchParams(window.location.search);
+    const sharedRoom = params.get('room');
+    if (sharedRoom && sharedRoom.trim()) {
+      const cleanCode = sharedRoom.trim().toUpperCase().slice(0, 10);
+      setInitialJoinRoomCode(cleanCode);
+      setPlayInitialMode('online');
+      setScreen('play');
+      notify(`Code d’invitation détecté : ${cleanCode}`);
+    }
     const sharedId = params.get('variant');
     if (sharedId) {
       const localMatch = state.variants.find((v) => v.id === sharedId);
       if (localMatch) {
         setSelectedPlayVariantId(localMatch.id);
         setPlayInitialMode('ai');
+        setPlayInitialCompetitive(true);
         setScreen('play');
       } else {
         Promise.all([
@@ -200,13 +329,46 @@ export default function App() {
             }));
             setSelectedPlayVariantId(remote.id);
             setPlayInitialMode('ai');
+            setPlayInitialCompetitive(true);
             setScreen('play');
             notify(`Variante partagée chargée : ${remote.name}`);
           }
         });
       }
+    } else if (!sharedRoom && state.profile.nickname) {
+      const pendingOnline = loadActiveOnlineSession();
+      if (pendingOnline && pendingOnline.userId === state.profile.id) {
+        if (pendingOnline.variantId) {
+          setSelectedPlayVariantId(pendingOnline.variantId);
+        }
+        setPlayInitialMode('online');
+        setPlayInitialCompetitive(pendingOnline.competitive !== false);
+        setScreen('play');
+        notify('Reprise de votre partie en ligne en cours...');
+      } else {
+        try {
+          if (localStorage.getItem(TUTORIAL_SEEN_KEY) !== '1') {
+            localStorage.setItem(TUTORIAL_SEEN_KEY, '1');
+            setScreen('home');
+            setShowTutorial(true);
+          }
+        } catch {
+          // ignore storage quota
+        }
+      }
     }
+
+    return () => {
+      unsubPublic();
+    };
   }, []);
+
+  // Refresh public variants when navigating to Home, Discover, or Play
+  useEffect(() => {
+    if (screen === 'discover' || screen === 'play' || screen === 'home') {
+      void fetchPublicVariants('').then(mergePublicIntoList);
+    }
+  }, [screen]);
 
   const enterWithProfile = (nick: string) => {
     const updatedProfile: Profile = {
@@ -223,6 +385,13 @@ export default function App() {
     }));
     syncProfileToServer(updatedProfile);
     notify(`Bienvenue ${updatedProfile.nickname} ! Votre classement démarre à 400 ÉOL.`);
+    try {
+      localStorage.setItem(TUTORIAL_SEEN_KEY, '1');
+    } catch {
+      // ignore storage quota
+    }
+    setShowTutorial(true);
+    navigateToScreen('home');
   };
 
   const handleCompleteOnboarding = (e: React.FormEvent) => {
@@ -268,7 +437,7 @@ export default function App() {
         ? prev.history
         : [
             {
-              id: `cr_${crypto.randomUUID().slice(0, 8)}`,
+              id: `cr_${safeUuid().slice(0, 8)}`,
               type: 'Variante créée',
               variantId: variant.id,
               variantName: variant.name,
@@ -284,6 +453,9 @@ export default function App() {
     });
 
     setSelectedPlayVariantId(variant.id);
+    if (variant.visibility === 'public') {
+      mergePublicIntoList([variant]);
+    }
     if (variant.visibility !== 'private') {
       await publishVariantToServer(variant);
     }
@@ -308,7 +480,7 @@ export default function App() {
   const handleForkVariant = (source: Variant) => {
     const fork: Variant = {
       ...JSON.parse(JSON.stringify(source)),
-      id: `var_${crypto.randomUUID().slice(0, 10)}`,
+      id: `var_${safeUuid().slice(0, 10)}`,
       name: `${source.name} (dérivée)`,
       visibility: 'private',
       creatorId: state.profile.id,
@@ -365,7 +537,7 @@ export default function App() {
   const handleSaveBoard = (board: BoardConfig, name: string) => {
     const saved: BoardConfig = {
       ...board,
-      id: `brd_${crypto.randomUUID().slice(0, 8)}`,
+      id: `brd_${safeUuid().slice(0, 8)}`,
       name,
     };
     setState((prev) => ({ ...prev, boards: [saved, ...prev.boards] }));
@@ -373,9 +545,13 @@ export default function App() {
   };
 
   const handleFinishGame = (record: GameRecord, updatedEol?: number) => {
+    const isCountedRanked =
+      (record.mode === 'ai' || record.mode === 'online' || record.mode === 'local') &&
+      record.competitive !== false;
+
     setState((prev) => {
       const nextProfile: Profile = { ...prev.profile };
-      if (record.mode === 'ai' || record.mode === 'online') {
+      if (isCountedRanked) {
         nextProfile.gamesPlayed += 1;
         if (record.result === 'win') nextProfile.wins += 1;
         else if (record.result === 'loss') nextProfile.losses += 1;
@@ -416,35 +592,25 @@ export default function App() {
       recordGameOnServer({
         userId: state.profile.id,
         variantId: record.variantId,
-        playerEolAfter: updatedEol,
-        result: record.result,
+        playerEolAfter: isCountedRanked ? updatedEol : undefined,
+        result: isCountedRanked ? record.result : 'saved',
       });
       if (firebaseUser) {
         void recordGameInFirestore(firebaseUser, record).catch(() => {});
         if (record.variantId) {
           void incrementVariantGamesInFirestore(firebaseUser, record.variantId).catch(() => {});
         }
-        const nextProfileForSync: Profile = {
-          ...state.profile,
-          gamesPlayed:
-            record.mode === 'ai' || record.mode === 'online'
-              ? state.profile.gamesPlayed + 1
-              : state.profile.gamesPlayed,
-          wins:
-            (record.mode === 'ai' || record.mode === 'online') && record.result === 'win'
-              ? state.profile.wins + 1
-              : state.profile.wins,
-          draws:
-            (record.mode === 'ai' || record.mode === 'online') && record.result === 'draw'
-              ? state.profile.draws + 1
-              : state.profile.draws,
-          losses:
-            (record.mode === 'ai' || record.mode === 'online') && record.result === 'loss'
-              ? state.profile.losses + 1
-              : state.profile.losses,
-          eol: typeof updatedEol === 'number' ? updatedEol : state.profile.eol,
-        };
-        void syncUserProfileToFirestore(firebaseUser, nextProfileForSync).catch(() => {});
+        if (isCountedRanked) {
+          const nextProfileForSync: Profile = {
+            ...state.profile,
+            gamesPlayed: state.profile.gamesPlayed + 1,
+            wins: record.result === 'win' ? state.profile.wins + 1 : state.profile.wins,
+            draws: record.result === 'draw' ? state.profile.draws + 1 : state.profile.draws,
+            losses: record.result === 'loss' ? state.profile.losses + 1 : state.profile.losses,
+            eol: typeof updatedEol === 'number' ? updatedEol : state.profile.eol,
+          };
+          void syncUserProfileToFirestore(firebaseUser, nextProfileForSync).catch(() => {});
+        }
       }
     }
   };
@@ -495,6 +661,19 @@ export default function App() {
     await signOut(auth);
     notify('Cloud Firebase déconnecté (jeu local conservé).');
   };
+
+  const allPlayableVariants = useMemo(() => {
+    const map = new Map<string, Variant>();
+    for (const v of state.variants) {
+      map.set(v.id, v);
+    }
+    for (const pv of publicVariants) {
+      if (!map.has(pv.id)) {
+        map.set(pv.id, pv);
+      }
+    }
+    return Array.from(map.values());
+  }, [state.variants, publicVariants]);
 
   // First-time profile creation screen (no email, no classic signup)
   if (!state.profile.nickname) {
@@ -607,7 +786,7 @@ export default function App() {
         <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between gap-8">
           <button
             type="button"
-            onClick={() => setScreen('home')}
+            onClick={() => navigateToScreen('home')}
             className="text-lg font-extrabold font-display tracking-tight text-slate-900 dark:text-slate-50 whitespace-nowrap shrink-0"
           >
             Chess <span className="text-sky-400">Lab</span>
@@ -616,7 +795,8 @@ export default function App() {
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-300">
             <button
               type="button"
-              onClick={() => setScreen('create')}
+              data-tutorial="nav-create"
+              onClick={() => navigateToScreen('create')}
               className={`whitespace-nowrap shrink-0 hover:text-sky-400 transition-colors ${
                 screen === 'create' || screen === 'pieces' ? 'text-sky-400 font-semibold' : ''
               }`}
@@ -625,7 +805,8 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setScreen('discover')}
+              data-tutorial="nav-discover"
+              onClick={() => navigateToScreen('discover')}
               className={`whitespace-nowrap shrink-0 hover:text-sky-400 transition-colors ${
                 screen === 'discover' ? 'text-sky-400 font-semibold' : ''
               }`}
@@ -634,7 +815,8 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setScreen('play')}
+              data-tutorial="nav-play"
+              onClick={() => navigateToScreen('play')}
               className={`whitespace-nowrap shrink-0 hover:text-sky-400 transition-colors ${
                 screen === 'play' ? 'text-sky-400 font-semibold' : ''
               }`}
@@ -643,7 +825,8 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setScreen('history')}
+              data-tutorial="nav-history"
+              onClick={() => navigateToScreen('history')}
               className={`whitespace-nowrap shrink-0 hover:text-sky-400 transition-colors ${
                 screen === 'history' ? 'text-sky-400 font-semibold' : ''
               }`}
@@ -652,7 +835,8 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setScreen('library')}
+              data-tutorial="nav-library"
+              onClick={() => navigateToScreen('library')}
               className={`whitespace-nowrap shrink-0 hover:text-sky-400 transition-colors ${
                 screen === 'library' ? 'text-sky-400 font-semibold' : ''
               }`}
@@ -662,10 +846,11 @@ export default function App() {
           </nav>
 
           <div className="flex items-center gap-2 shrink-0">
-            <PWAInstallButton compact />
+            <PWAInstallButton compact showInfoCorner />
             <button
               type="button"
-              onClick={() => setScreen('settings')}
+              data-tutorial="nav-settings"
+              onClick={() => navigateToScreen('settings')}
               className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-[#151c27] hover:border-sky-400 text-xs font-semibold whitespace-nowrap shrink-0 min-h-[38px]"
             >
               <Settings className="w-3.5 h-3.5 text-sky-400" />
@@ -683,14 +868,7 @@ export default function App() {
               Chess Lab est prêt à être installé sur votre appareil (gratuit, hors-ligne).
             </div>
             <div className="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={() => void triggerPwaInstall()}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-bold text-xs px-3.5 py-2 min-h-[38px]"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Installer en 1 clic</span>
-              </button>
+              <PWAInstallButton showInfoCorner customLabel="Installer en 1 clic" />
               <button
                 type="button"
                 onClick={() => setDismissedInstallBanner(true)}
@@ -705,13 +883,14 @@ export default function App() {
         {screen === 'home' && (
           <HomeView
             profile={state.profile}
-            variantsCount={state.variants.length}
-            recentVariants={state.variants}
-            onNavigate={setScreen}
+            variantsCount={allPlayableVariants.length}
+            recentVariants={allPlayableVariants}
+            onNavigate={navigateToScreen}
             onPlayVariant={(v) => {
               setSelectedPlayVariantId(v.id);
               setPlayInitialMode('ai');
-              setScreen('play');
+              setPlayInitialCompetitive(true);
+              navigateToScreen('play');
             }}
           />
         )}
@@ -725,7 +904,7 @@ export default function App() {
             onChangeDraft={setVariantDraft}
             onSaveVariant={handleSaveVariant}
             onSaveBoard={handleSaveBoard}
-            onOpenPieceCreator={() => setScreen('pieces')}
+            onOpenPieceCreator={() => navigateToScreen('pieces')}
             onTestVariantPlay={(built) => {
               setState((prev) => {
                 const exists = prev.variants.some((v) => v.id === built.id);
@@ -738,7 +917,8 @@ export default function App() {
               });
               setSelectedPlayVariantId(built.id);
               setPlayInitialMode('local');
-              setScreen('play');
+              setPlayInitialCompetitive(false);
+              navigateToScreen('play');
               notify('Variante prête pour le test en partie.');
             }}
             onNotify={notify}
@@ -753,7 +933,7 @@ export default function App() {
             settings={state.settings}
             onSavePiece={handleSavePiece}
             onDeletePiece={handleDeletePiece}
-            onBack={() => setScreen('create')}
+            onBack={() => navigateToScreen('create')}
             onNotify={notify}
           />
         )}
@@ -761,10 +941,11 @@ export default function App() {
         {screen === 'discover' && (
           <DiscoverView
             localVariants={state.variants}
+            externalPublicVariants={publicVariants}
             profile={state.profile}
             customPieces={state.pieces}
             firebaseUser={firebaseUser}
-            onPlayAiVariant={(v) => {
+            onPlayAiVariant={(v, competitive) => {
               setState((prev) => ({
                 ...prev,
                 variants: prev.variants.some((x) => x.id === v.id)
@@ -773,6 +954,7 @@ export default function App() {
               }));
               setSelectedPlayVariantId(v.id);
               setPlayInitialMode('ai');
+              setPlayInitialCompetitive(competitive);
               setScreen('play');
             }}
             onOnlineMatched={(payload) => {
@@ -787,10 +969,15 @@ export default function App() {
                 roomId: payload.roomId,
                 code: payload.code,
                 yourSide: payload.yourSide,
+                competitive: payload.competitive,
                 opponent: payload.opponent,
+                participants: payload.participants,
+                aiSeats: payload.aiSeats,
+                hostUserId: payload.hostUserId,
                 ws: payload.ws,
               });
               setPlayInitialMode('online');
+              setPlayInitialCompetitive(payload.competitive);
               setScreen('play');
             }}
             onForkVariant={handleForkVariant}
@@ -806,9 +993,11 @@ export default function App() {
 
         {screen === 'play' && (
           <GamePlay
-            variants={state.variants}
+            variants={allPlayableVariants}
             selectedVariantId={selectedPlayVariantId}
             initialMode={playInitialMode}
+            initialCompetitive={playInitialCompetitive}
+            initialJoinRoomCode={initialJoinRoomCode}
             autoMatchedRoom={matchedOnlineRoom}
             profile={state.profile}
             customPieces={state.pieces}
@@ -817,7 +1006,10 @@ export default function App() {
             onSelectVariantId={setSelectedPlayVariantId}
             onFinishGame={handleFinishGame}
             onRateVariant={handleRateVariant}
-            onClearOnlineRoom={() => setMatchedOnlineRoom(null)}
+            onClearOnlineRoom={() => {
+              setMatchedOnlineRoom(null);
+              setInitialJoinRoomCode('');
+            }}
             onNotify={notify}
           />
         )}
@@ -831,6 +1023,7 @@ export default function App() {
             onPlayVariant={(v) => {
               setSelectedPlayVariantId(v.id);
               setPlayInitialMode('ai');
+              setPlayInitialCompetitive(true);
               setScreen('play');
             }}
             onEditVariant={(v) => {
@@ -854,6 +1047,11 @@ export default function App() {
                 ...prev,
                 variants: prev.variants.map((x) => (x.id === v.id ? updated : x)),
               }));
+              if (vis === 'public') {
+                mergePublicIntoList([updated]);
+              } else {
+                setPublicVariants((prev) => prev.filter((x) => x.id !== v.id));
+              }
               if (vis !== 'private') {
                 await publishVariantToServer(updated);
               }
@@ -877,7 +1075,7 @@ export default function App() {
               }));
               notify('Plateau supprimé.');
             }}
-            onOpenPieceCreator={() => setScreen('pieces')}
+            onOpenPieceCreator={() => navigateToScreen('pieces')}
             onDeletePiece={handleDeletePiece}
             onApplySavedTheme={(t: SavedTheme) => {
               setState((prev) => ({
@@ -912,6 +1110,9 @@ export default function App() {
           <HistoryView
             history={state.history}
             ratings={state.ratings}
+            variants={allPlayableVariants}
+            customPieces={state.pieces}
+            settings={state.settings}
             onRateVariant={handleRateVariant}
           />
         )}
@@ -921,6 +1122,10 @@ export default function App() {
             profile={state.profile}
             settings={state.settings}
             firebaseUser={firebaseUser}
+            onOpenTutorial={() => {
+              navigateToScreen('home');
+              setShowTutorial(true);
+            }}
             onConnectCloud={handleConnectGoogleCloud}
             onDisconnectCloud={handleDisconnectGoogleCloud}
             onSyncAllNow={async () => {
@@ -958,9 +1163,15 @@ export default function App() {
             }
             onResetAllData={() => {
               const fresh = createBlankState();
+              try {
+                localStorage.removeItem(TUTORIAL_SEEN_KEY);
+              } catch {
+                // ignore
+              }
+              clearSessionNav();
               setState(fresh);
               setVariantDraft(createEmptyDraftVariant(fresh.profile));
-              setScreen('home');
+              navigateToScreen('home');
               notify('Données locales réinitialisées.');
             }}
             onNotify={notify}
@@ -977,7 +1188,8 @@ export default function App() {
             <button
               key={item.id}
               type="button"
-              onClick={() => setScreen(item.id)}
+              data-tutorial={`bottom-${item.id}`}
+              onClick={() => navigateToScreen(item.id)}
               className={`flex flex-col items-center justify-center py-1 rounded-lg min-h-[44px] ${
                 isActive
                   ? 'text-sky-400 bg-sky-500/10 font-semibold'
@@ -992,6 +1204,19 @@ export default function App() {
       </nav>
 
       <OfflineIndicator />
+
+      <TutorialModal
+        open={showTutorial}
+        onClose={() => {
+          try {
+            localStorage.setItem(TUTORIAL_SEEN_KEY, '1');
+          } catch {
+            // ignore storage quota
+          }
+          setShowTutorial(false);
+          scrollToPageTop();
+        }}
+      />
 
       {toastMsg && (
         <div

@@ -56,6 +56,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          cleanupOutdatedCaches: true,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
           navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/stockfish\//],
@@ -91,7 +92,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
         },
       }),
       // Copies src/assets into dist/ so root-relative URLs like

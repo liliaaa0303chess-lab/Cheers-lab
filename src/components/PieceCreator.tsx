@@ -18,6 +18,7 @@ import type {
 } from '../types/chess';
 import { ChessBoard } from './ChessBoard';
 import { validateFamilyFriendlyText } from '../utils/moderation';
+import { safeUuid } from '../utils/safeId';
 
 interface PieceCreatorProps {
   pieces: PieceDef[];
@@ -197,7 +198,7 @@ export const PieceCreator: React.FC<PieceCreatorProps> = ({
     }
     const saved: PieceDef = {
       ...form,
-      id: form.id || `piece_${crypto.randomUUID().slice(0, 8)}`,
+      id: form.id || `piece_${safeUuid().slice(0, 8)}`,
       name: form.name.trim(),
     };
     onSavePiece(saved);

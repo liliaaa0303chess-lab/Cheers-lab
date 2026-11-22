@@ -39,6 +39,7 @@ import type {
 import { BoardEditor } from './BoardEditor';
 import { ChessBoard } from './ChessBoard';
 import { validateFamilyFriendlyText } from '../utils/moderation';
+import { safeUuid } from '../utils/safeId';
 
 interface VariantCreatorProps {
   profile: Profile;
@@ -75,6 +76,7 @@ export function createEmptyDraftVariant(profile: Profile): Variant {
     goal: 'Mettre le Roi adverse échec et mat.',
     actions: 1,
     duration: 10,
+    incrementSec: 0,
     turnOrder: 'Blancs, Noirs',
     rules: '',
     board: makeDefaultBoard(8, 8),
@@ -134,7 +136,7 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
 
   const handleAddCaptureRestriction = () => {
     const nextRule: VariantCaptureRestriction = {
-      id: `cap_${crypto.randomUUID().slice(0, 6)}`,
+      id: `cap_${safeUuid().slice(0, 6)}`,
       attacker: capAttacker,
       target: capTarget,
       condition: capCondition,
@@ -260,7 +262,7 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
 
     const finalVariant: Variant = {
       ...draft,
-      id: draft.id || `var_${crypto.randomUUID().slice(0, 10)}`,
+      id: draft.id || `var_${safeUuid().slice(0, 10)}`,
       name: draft.name.trim(),
       pieces: Array.from(usedCustomIds),
       customPieceDefs: customDefs,
@@ -486,7 +488,7 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
           4. Règles générales
         </h2>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <label className="block space-y-1">
             <span className="text-xs text-slate-500 dark:text-slate-400">Nombre de joueurs</span>
             <select
@@ -523,25 +525,6 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
 
           <label className="block space-y-1">
             <span className="text-xs text-slate-500 dark:text-slate-400">
-              Durée (min, 0 = illimitée)
-            </span>
-            <input
-              type="number"
-              min={0}
-              max={180}
-              value={draft.duration}
-              onChange={(e) =>
-                onChangeDraft({
-                  ...draft,
-                  duration: Math.max(0, Number(e.target.value) || 0),
-                })
-              }
-              className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm font-mono-num"
-            />
-          </label>
-
-          <label className="block space-y-1">
-            <span className="text-xs text-slate-500 dark:text-slate-400">
               Condition de victoire
             </span>
             <select
@@ -561,6 +544,97 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
               <option value="custom">Règle personnalisée (texte)</option>
             </select>
           </label>
+        </div>
+
+        {/* Pendule personnalisée : exemples rapides + champs minutes et incrément */}
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0f151f] p-3.5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+              Pendule personnalisée (minutes + incrément par coup)
+            </span>
+            <span className="text-xs font-mono-num font-semibold text-sky-400">
+              {draft.duration > 0
+                ? `${draft.duration} min + ${draft.incrementSec || 0} s / coup`
+                : 'Sans pendule (illimité)'}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {[
+              { label: 'Illimité', min: 0, inc: 0 },
+              { label: '1 + 0 Bullet', min: 1, inc: 0 },
+              { label: '3 + 2 Blitz', min: 3, inc: 2 },
+              { label: '5 + 3 Blitz', min: 5, inc: 3 },
+              { label: '10 + 0 Rapide', min: 10, inc: 0 },
+              { label: '10 + 5', min: 10, inc: 5 },
+              { label: '15 + 10', min: 15, inc: 10 },
+              { label: '30 + 0 Classique', min: 30, inc: 0 },
+            ].map((preset) => {
+              const selected =
+                draft.duration === preset.min && (draft.incrementSec || 0) === preset.inc;
+              return (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() =>
+                    onChangeDraft({
+                      ...draft,
+                      duration: preset.min,
+                      incrementSec: preset.inc,
+                    })
+                  }
+                  className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                    selected
+                      ? 'border-sky-500 bg-sky-500/20 text-sky-300 font-semibold'
+                      : 'border-slate-300 dark:border-slate-700 bg-white dark:bg-[#151c27] text-slate-600 dark:text-slate-300 hover:border-sky-400'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block space-y-1">
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                Durée initiale (min, 0 = illimitée)
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={180}
+                value={draft.duration}
+                onChange={(e) =>
+                  onChangeDraft({
+                    ...draft,
+                    duration: Math.max(0, Math.min(180, Number(e.target.value) || 0)),
+                  })
+                }
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#151c27] px-3 py-2 text-sm font-mono-num"
+              />
+            </label>
+
+            <label className="block space-y-1">
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                Incrément par coup (secondes)
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={120}
+                disabled={draft.duration <= 0}
+                value={draft.duration > 0 ? draft.incrementSec || 0 : 0}
+                onChange={(e) =>
+                  onChangeDraft({
+                    ...draft,
+                    incrementSec: Math.max(0, Math.min(120, Number(e.target.value) || 0)),
+                  })
+                }
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#151c27] px-3 py-2 text-sm font-mono-num disabled:opacity-45"
+              />
+            </label>
+          </div>
         </div>
 
         {draft.victoryType === 'capture_count' && (
@@ -634,6 +708,12 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
               'Seul le Roi peut manger la Dame.',
               'Prise obligatoire.',
               '3 échecs pour gagner.',
+              ...(draft.players >= 3
+                ? [
+                    'Équipe 1 : Blancs et Rouges. Équipe 2 : Noirs et Bleus.',
+                    '2 contre 2 (équipes alternées).',
+                  ]
+                : []),
             ].map((sample) => (
               <button
                 key={sample}
@@ -710,6 +790,105 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
               </label>
             ))}
           </div>
+
+          {draft.players >= 3 && (
+            <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                    Équipes (optionnel)
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Les alliés d’une même équipe ne se capturent pas, ne se mettent pas en échec et gagnent ensemble.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateRuleConstraint({
+                      teamAssignments: undefined,
+                      teamSharedElimination: false,
+                    })
+                  }
+                  className="px-2.5 py-1 rounded-lg border border-slate-300 dark:border-slate-700 text-[11px] text-slate-600 dark:text-slate-300 hover:border-sky-500"
+                >
+                  Chacun pour soi
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                {activeSides.map((s) => {
+                  const assigned = ruleConstraints.teamAssignments?.[s] || 0;
+                  const maxTeams = Math.min(3, Math.max(2, Math.floor(activeSides.length / 2) + 1));
+                  const teamNums = Array.from({ length: maxTeams }, (_, i) => i + 1);
+                  return (
+                    <div
+                      key={s}
+                      className="flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#151c27] text-xs"
+                    >
+                      <span className="font-semibold text-slate-800 dark:text-slate-200">
+                        {SIDE_LABELS[s]}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const next = { ...(ruleConstraints.teamAssignments || {}) };
+                            delete next[s];
+                            updateRuleConstraint({
+                              teamAssignments: Object.keys(next).length > 0 ? next : undefined,
+                            });
+                          }}
+                          className={`px-2 py-1 rounded text-[11px] font-medium border ${
+                            assigned === 0
+                              ? 'border-sky-500 bg-sky-500/20 text-sky-400'
+                              : 'border-slate-200 dark:border-slate-700 text-slate-500'
+                          }`}
+                        >
+                          Solo
+                        </button>
+                        {teamNums.map((tNum) => (
+                          <button
+                            key={tNum}
+                            type="button"
+                            onClick={() =>
+                              updateRuleConstraint({
+                                teamAssignments: {
+                                  ...(ruleConstraints.teamAssignments || {}),
+                                  [s]: tNum,
+                                },
+                              })
+                            }
+                            className={`px-2 py-1 rounded text-[11px] font-semibold border ${
+                              assigned === tNum
+                                ? 'border-emerald-500 bg-emerald-500/20 text-emerald-400'
+                                : 'border-slate-200 dark:border-slate-700 text-slate-500'
+                            }`}
+                          >
+                            Éq.{tNum}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(ruleConstraints.teamSharedElimination)}
+                  onChange={(e) =>
+                    updateRuleConstraint({ teamSharedElimination: e.target.checked })
+                  }
+                  className="accent-sky-500"
+                />
+                <span>
+                  Défaite d’équipe partagée (si un allié est mat ou éliminé, toute son équipe perd immédiatement)
+                </span>
+              </label>
+            </div>
+          )}
 
           {/* Constructeur de règle conditionnelle de capture */}
           <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2.5">
@@ -854,7 +1033,7 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
                   ))}
                 </ul>
                 <p className="text-[11px] text-amber-600/90 dark:text-amber-300/80">
-                  Le moteur n’invente pas de règle ambiguë pour éviter les bugs. Utilisez les cases à cocher ci-dessus ou des formulations reconnues : ex. « Aucune pièce, sauf le Roi, n’a le droit de reculer », « Les tours bougent comme des cavaliers », « Toutes les pièces peuvent sauter », « Pas de capture au premier tour », « Après une capture, on rejoue », « Seul le Roi peut manger la Dame ».
+                  Le moteur n’invente pas de règle ambiguë pour éviter les bugs. Exemples reconnus : « Aucune pièce, sauf le Roi, n’a le droit de reculer », « Les fous ne peuvent manger que les pions », « Un pion ne peut pas être mangé par un cavalier », « Les cavaliers ne peuvent pas sauter », « Les fous ne vont que sur les cases noires », « Les pièces défendues ne peuvent pas être capturées », « Échecs atomiques », « Premier qui fait échec gagne », « Le pat fait gagner ».
                 </p>
               </div>
             )}
