@@ -45,6 +45,22 @@
         "discoveredVariants": {
           "type": "array"
         },
+        "loginStreak": {
+          "type": "integer"
+        },
+        "bestLoginStreak": {
+          "type": "integer"
+        },
+        "lastStreakDate": {
+          "type": "string",
+          "maxLength": 16
+        },
+        "botChallenges": {
+          "type": "object"
+        },
+        "botRebellionUnlocked": {
+          "type": "boolean"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"

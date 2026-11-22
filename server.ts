@@ -235,7 +235,7 @@ function launchOnlineRoom(room: OnlineRoom, customAiLevels?: number[]) {
     const aiSide = shuffled[idx];
     const requestedLvl = customAiLevels?.[idx - room.players.length];
     const validLvl: AiDifficultyLevel =
-      typeof requestedLvl === 'number' && requestedLvl >= 1 && requestedLvl <= 10
+      typeof requestedLvl === 'number' && requestedLvl >= 1 && requestedLvl <= 20
         ? (Math.round(requestedLvl) as AiDifficultyLevel)
         : getClosestAiLevelForEol(avgHumanEol);
     const meta = AI_LEVELS.find((l) => l.level === validLvl) || AI_LEVELS[2];

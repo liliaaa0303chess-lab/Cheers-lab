@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Compass,
   Hammer,
@@ -9,6 +9,7 @@ import {
   Settings,
   X,
 } from 'lucide-react';
+import { BotRebellionModal } from './components/BotRebellionModal';
 import { GamePlay } from './components/GamePlay';
 import { DiscoverView } from './components/DiscoverView';
 import { HistoryView } from './components/HistoryView';
@@ -18,6 +19,7 @@ import { PieceCreator } from './components/PieceCreator';
 import { SettingsView } from './components/SettingsView';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { StreakAndChallengeModal } from './components/StreakAndChallengeModal';
 import { TutorialModal } from './components/TutorialModal';
 import { usePWAInstall } from './hooks/usePWAInstall';
 import {
@@ -26,9 +28,11 @@ import {
 } from './components/VariantCreator';
 import {
   auth,
+  getRedirectResult,
   googleProvider,
   onAuthStateChanged,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   type User,
 } from './firebase';
@@ -77,6 +81,17 @@ import {
   isContentFamilyFriendly,
   validateFamilyFriendlyText,
 } from './utils/moderation';
+import {
+  backfillBotChallengesFromHistory,
+  createSecretRebellionVariant,
+  getBotChallengeProgress,
+  inferAiLevelFromRecord,
+  mergeBotChallenges,
+  recordBotChallengeWin,
+  SECRET_REBELLION_PIECE,
+  SECRET_REBELLION_VARIANT_ID,
+} from './utils/botChallenge';
+import { evaluateDailyStreak, getStreakRank } from './utils/streaks';
 import { safeUuid } from './utils/safeId';
 
 const AVATAR_SYMBOLS = ['♔', '♕', '♖', '♗', '♘', '★', '⚡', '✦'];
@@ -104,7 +119,13 @@ export default function App() {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [showTutorial, setShowTutorial] = useState(false);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
+  const [cloudConnecting, setCloudConnecting] = useState(false);
+  const [cloudAuthError, setCloudAuthError] = useState<string | null>(null);
+  const [challengeModalTab, setChallengeModalTab] = useState<'streak' | 'bots' | null>(null);
+  const [showBotRebellionModal, setShowBotRebellionModal] = useState(false);
   const [dismissedInstallBanner, setDismissedInstallBanner] = useState(false);
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const {
     isInstallable: pwaInstallable,
     isInstalled: pwaInstalled,
@@ -217,15 +238,109 @@ export default function App() {
     root.style.setProperty('--accent-color', state.settings.accent || '#7ebcff');
   }, [state.settings.theme, state.settings.accent]);
 
-  // Firebase Auth listener + initial cloud profile merge
+  // Daily chess streak evaluation + backfill of past 8-bot victories
   useEffect(() => {
+    const syncDailyProgress = () => {
+      const current = stateRef.current;
+      if (!current.profile.nickname) return;
+
+      const streakRes = evaluateDailyStreak(current.profile);
+      const backfilledProfile = backfillBotChallengesFromHistory(
+        streakRes.nextProfile,
+        current.history
+      );
+      const prog = getBotChallengeProgress(backfilledProfile);
+      const shouldUnlockLoot = prog.isComplete && !backfilledProfile.botRebellionUnlocked;
+      const finalProfile = shouldUnlockLoot
+        ? { ...backfilledProfile, botRebellionUnlocked: true }
+        : backfilledProfile;
+
+      const profileChanged =
+        streakRes.changed ||
+        shouldUnlockLoot ||
+        JSON.stringify(finalProfile.botChallenges || {}) !==
+          JSON.stringify(current.profile.botChallenges || {});
+
+      if (profileChanged) {
+        setState((prev) => {
+          const nextPieces =
+            finalProfile.botRebellionUnlocked &&
+            !prev.pieces.some((p) => p.id === SECRET_REBELLION_PIECE.id)
+              ? [SECRET_REBELLION_PIECE, ...prev.pieces]
+              : prev.pieces;
+          const nextVariants =
+            finalProfile.botRebellionUnlocked &&
+            !prev.variants.some((v) => v.id === SECRET_REBELLION_VARIANT_ID)
+              ? [createSecretRebellionVariant(finalProfile), ...prev.variants]
+              : prev.variants;
+          return {
+            ...prev,
+            profile: finalProfile,
+            pieces: nextPieces,
+            variants: nextVariants,
+          };
+        });
+        if (streakRes.promoted) {
+          const rank = getStreakRank(finalProfile.loginStreak || 1).current;
+          notify(`Promotion quotidienne ! ${rank.symbol} ${rank.title} (${finalProfile.loginStreak} j)`);
+        } else if (streakRes.incremented) {
+          const rank = getStreakRank(finalProfile.loginStreak || 1).current;
+          notify(`Série d’échiquier : ${finalProfile.loginStreak} jours (${rank.symbol})`);
+        }
+        if (shouldUnlockLoot) {
+          setShowBotRebellionModal(true);
+        }
+      }
+    };
+
+    syncDailyProgress();
+    const onVis = () => {
+      if (document.visibilityState === 'visible') syncDailyProgress();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [Boolean(state.profile.nickname)]);
+
+  // Firebase Auth listener + redirect completion + cloud profile merge
+  useEffect(() => {
+    void getRedirectResult(auth)
+      .then(async (cred) => {
+        if (cred?.user) {
+          setCloudAuthError(null);
+          try {
+            await syncUserProfileToFirestore(cred.user, stateRef.current.profile);
+          } catch {
+            // Best effort sync after redirect
+          }
+          notify(`Cloud Firebase connecté (${cred.user.displayName || 'Google'}).`);
+        }
+      })
+      .catch((err: unknown) => {
+        const code = (err as { code?: string })?.code;
+        if (code && code !== 'auth/no-current-user') {
+          console.warn('Redirect auth result warning:', code, err);
+        }
+      });
+
     const unsub = onAuthStateChanged(auth, async (user) => {
       setFirebaseUser(user);
+      if (user) {
+        setCloudAuthError(null);
+      }
       if (user && user.emailVerified) {
         try {
           const remote = await loadUserProfileFromFirestore(user);
           if (remote) {
             setState((prev) => {
+              const mergedChallenges = mergeBotChallenges(
+                prev.profile.botChallenges,
+                remote.botChallenges
+              );
+              const mergedUnlocked = Boolean(
+                prev.profile.botRebellionUnlocked ||
+                  remote.botRebellionUnlocked ||
+                  getBotChallengeProgress({ ...prev.profile, botChallenges: mergedChallenges }).isComplete
+              );
               const mergedProfile: Profile = {
                 ...prev.profile,
                 nickname: prev.profile.nickname || remote.nickname || user.displayName || 'Joueur',
@@ -236,6 +351,17 @@ export default function App() {
                 wins: Math.max(prev.profile.wins, remote.wins ?? 0),
                 draws: Math.max(prev.profile.draws, remote.draws ?? 0),
                 losses: Math.max(prev.profile.losses, remote.losses ?? 0),
+                loginStreak: Math.max(prev.profile.loginStreak || 0, remote.loginStreak || 0),
+                bestLoginStreak: Math.max(
+                  prev.profile.bestLoginStreak || 0,
+                  remote.bestLoginStreak || 0
+                ),
+                lastStreakDate:
+                  (prev.profile.lastStreakDate || '') >= (remote.lastStreakDate || '')
+                    ? prev.profile.lastStreakDate
+                    : remote.lastStreakDate,
+                botChallenges: mergedChallenges,
+                botRebellionUnlocked: mergedUnlocked,
                 discoveredVariants: Array.from(
                   new Set([
                     ...(prev.profile.discoveredVariants || []),
@@ -243,10 +369,24 @@ export default function App() {
                   ])
                 ),
               };
-              return { ...prev, profile: mergedProfile };
+              const nextPieces =
+                mergedUnlocked && !prev.pieces.some((p) => p.id === SECRET_REBELLION_PIECE.id)
+                  ? [SECRET_REBELLION_PIECE, ...prev.pieces]
+                  : prev.pieces;
+              const nextVariants =
+                mergedUnlocked &&
+                !prev.variants.some((v) => v.id === SECRET_REBELLION_VARIANT_ID)
+                  ? [createSecretRebellionVariant(mergedProfile), ...prev.variants]
+                  : prev.variants;
+              return {
+                ...prev,
+                profile: mergedProfile,
+                pieces: nextPieces,
+                variants: nextVariants,
+              };
             });
-          } else if (state.profile.nickname) {
-            await syncUserProfileToFirestore(user, state.profile);
+          } else if (stateRef.current.profile.nickname) {
+            await syncUserProfileToFirestore(user, stateRef.current.profile);
           }
         } catch (err) {
           console.warn('Firestore profile sync skipped:', err);
@@ -371,12 +511,13 @@ export default function App() {
   }, [screen]);
 
   const enterWithProfile = (nick: string) => {
-    const updatedProfile: Profile = {
+    const baseProfile: Profile = {
       ...state.profile,
       nickname: nick.slice(0, 32),
       avatarSymbol: onboardingSymbol,
       avatarColor: onboardingColor,
     };
+    const updatedProfile = evaluateDailyStreak(baseProfile).nextProfile;
     setState((prev) => ({ ...prev, profile: updatedProfile }));
     setVariantDraft((d) => ({
       ...d,
@@ -549,8 +690,11 @@ export default function App() {
       (record.mode === 'ai' || record.mode === 'online' || record.mode === 'local') &&
       record.competitive !== false;
 
+    let unlockedRebellionNow = false;
+    let syncedNextProfile: Profile | null = null;
+
     setState((prev) => {
-      const nextProfile: Profile = { ...prev.profile };
+      let nextProfile: Profile = evaluateDailyStreak({ ...prev.profile }).nextProfile;
       if (isCountedRanked) {
         nextProfile.gamesPlayed += 1;
         if (record.result === 'win') nextProfile.wins += 1;
@@ -574,19 +718,47 @@ export default function App() {
         }
       }
 
-      const nextVariants = prev.variants.map((v) =>
+      if (record.mode === 'ai' && record.result === 'win' && record.variantId) {
+        const lvl = inferAiLevelFromRecord(record);
+        if (lvl && lvl >= 1 && lvl <= 8) {
+          const challengeRes = recordBotChallengeWin(nextProfile, record.variantId, lvl);
+          nextProfile = challengeRes.nextProfile;
+          if (challengeRes.justCompletedAll) {
+            unlockedRebellionNow = true;
+          }
+        }
+      }
+
+      syncedNextProfile = nextProfile;
+
+      let nextPieces = prev.pieces;
+      let nextVariants = prev.variants.map((v) =>
         v.id === record.variantId && record.mode !== 'analysis'
           ? { ...v, games: (v.games || 0) + 1 }
           : v
       );
 
+      if (unlockedRebellionNow || nextProfile.botRebellionUnlocked) {
+        if (!nextPieces.some((p) => p.id === SECRET_REBELLION_PIECE.id)) {
+          nextPieces = [SECRET_REBELLION_PIECE, ...nextPieces];
+        }
+        if (!nextVariants.some((v) => v.id === SECRET_REBELLION_VARIANT_ID)) {
+          nextVariants = [createSecretRebellionVariant(nextProfile), ...nextVariants];
+        }
+      }
+
       return {
         ...prev,
         profile: nextProfile,
+        pieces: nextPieces,
         variants: nextVariants,
         history: [record, ...prev.history],
       };
     });
+
+    if (unlockedRebellionNow) {
+      setTimeout(() => setShowBotRebellionModal(true), 450);
+    }
 
     if (record.mode !== 'analysis') {
       recordGameOnServer({
@@ -600,14 +772,26 @@ export default function App() {
         if (record.variantId) {
           void incrementVariantGamesInFirestore(firebaseUser, record.variantId).catch(() => {});
         }
-        if (isCountedRanked) {
-          const nextProfileForSync: Profile = {
+        if (isCountedRanked || unlockedRebellionNow) {
+          const nextProfileForSync: Profile = syncedNextProfile || {
             ...state.profile,
-            gamesPlayed: state.profile.gamesPlayed + 1,
-            wins: record.result === 'win' ? state.profile.wins + 1 : state.profile.wins,
-            draws: record.result === 'draw' ? state.profile.draws + 1 : state.profile.draws,
-            losses: record.result === 'loss' ? state.profile.losses + 1 : state.profile.losses,
-            eol: typeof updatedEol === 'number' ? updatedEol : state.profile.eol,
+            gamesPlayed: isCountedRanked ? state.profile.gamesPlayed + 1 : state.profile.gamesPlayed,
+            wins:
+              isCountedRanked && record.result === 'win'
+                ? state.profile.wins + 1
+                : state.profile.wins,
+            draws:
+              isCountedRanked && record.result === 'draw'
+                ? state.profile.draws + 1
+                : state.profile.draws,
+            losses:
+              isCountedRanked && record.result === 'loss'
+                ? state.profile.losses + 1
+                : state.profile.losses,
+            eol:
+              isCountedRanked && typeof updatedEol === 'number'
+                ? updatedEol
+                : state.profile.eol,
           };
           void syncUserProfileToFirestore(firebaseUser, nextProfileForSync).catch(() => {});
         }
@@ -641,24 +825,80 @@ export default function App() {
   };
 
   const handleConnectGoogleCloud = async () => {
+    if (cloudConnecting) return;
+    setCloudConnecting(true);
+    setCloudAuthError(null);
+
+    let signedInUser: User | null = null;
     try {
       const cred = await signInWithPopup(auth, googleProvider);
-      const user = cred.user;
-      if (user) {
-        await syncUserProfileToFirestore(user, state.profile);
-        for (const v of state.variants.filter((x) => !x.id.startsWith('var_classic') && !x.id.startsWith('var_chaos') && !x.id.startsWith('var_mini6') && !x.id.startsWith('var_fortress'))) {
-          await publishVariantToFirestore(user, v).catch(() => {});
-        }
-        notify(`Cloud Firebase connecté (${user.displayName || 'Google'}).`);
-      }
+      signedInUser = cred.user;
     } catch (err) {
-      console.error(err);
-      notify('Connexion Google annulée ou bloquée par le navigateur.');
+      const code = (err as { code?: string })?.code || '';
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      const inIframe = typeof window !== 'undefined' && window.self !== window.top;
+
+      if (
+        (code === 'auth/popup-blocked' ||
+          code === 'auth/operation-not-supported-in-this-environment') &&
+        !inIframe
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirErr) {
+          console.error('Firebase redirect fallback error:', redirErr);
+        }
+      }
+
+      let msg = 'Connexion Google annulée ou bloquée par le navigateur.';
+      if (code === 'auth/unauthorized-domain') {
+        msg = `Ce domaine (${host}) n’est pas encore autorisé dans Firebase Authentication → Domaines autorisés.`;
+      } else if (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment') {
+        msg = inIframe
+          ? 'La fenêtre Google est bloquée dans l’aperçu intégré : ouvrez Chess Lab dans son propre onglet pour vous connecter.'
+          : 'La fenêtre Google a été bloquée par votre navigateur. Autorisez les pop-ups pour ce site puis réessayez.';
+      } else if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        msg = 'Fenêtre Google fermée avant la fin de la connexion.';
+      } else if (code === 'auth/network-request-failed') {
+        msg = 'Connexion impossible : vérifiez votre connexion internet ou votre bloqueur de contenu.';
+      } else if (code) {
+        msg = `Connexion Google impossible (${code}).`;
+      }
+
+      console.error('Firebase auth error:', code, err);
+      setCloudAuthError(msg);
+      notify(msg);
+      setCloudConnecting(false);
+      return;
     }
+
+    if (signedInUser) {
+      setFirebaseUser(signedInUser);
+      try {
+        await syncUserProfileToFirestore(signedInUser, stateRef.current.profile);
+        for (const v of stateRef.current.variants.filter(
+          (x) =>
+            !x.id.startsWith('var_classic') &&
+            !x.id.startsWith('var_chaos') &&
+            !x.id.startsWith('var_mini6') &&
+            !x.id.startsWith('var_fortress') &&
+            x.id !== SECRET_REBELLION_VARIANT_ID
+        )) {
+          await publishVariantToFirestore(signedInUser, v).catch(() => {});
+        }
+        notify(`Cloud Firebase connecté (${signedInUser.displayName || 'Google'}).`);
+      } catch (syncErr) {
+        console.warn('Post-login Firestore sync warning:', syncErr);
+        notify(`Google connecté (${signedInUser.displayName || 'OK'}), synchro Cloud en attente — cliquez sur Synchroniser.`);
+      }
+    }
+    setCloudConnecting(false);
   };
 
   const handleDisconnectGoogleCloud = async () => {
     await signOut(auth);
+    setCloudAuthError(null);
     notify('Cloud Firebase déconnecté (jeu local conservé).');
   };
 
@@ -886,6 +1126,7 @@ export default function App() {
             variantsCount={allPlayableVariants.length}
             recentVariants={allPlayableVariants}
             onNavigate={navigateToScreen}
+            onOpenChallenges={(tab = 'streak') => setChallengeModalTab(tab)}
             onPlayVariant={(v) => {
               setSelectedPlayVariantId(v.id);
               setPlayInitialMode('ai');
@@ -1010,6 +1251,7 @@ export default function App() {
               setMatchedOnlineRoom(null);
               setInitialJoinRoomCode('');
             }}
+            onOpenChallenges={(tab = 'bots') => setChallengeModalTab(tab)}
             onNotify={notify}
           />
         )}
@@ -1122,6 +1364,8 @@ export default function App() {
             profile={state.profile}
             settings={state.settings}
             firebaseUser={firebaseUser}
+            cloudConnecting={cloudConnecting}
+            cloudAuthError={cloudAuthError}
             onOpenTutorial={() => {
               navigateToScreen('home');
               setShowTutorial(true);
@@ -1136,7 +1380,8 @@ export default function App() {
                   !x.id.startsWith('var_classic') &&
                   !x.id.startsWith('var_chaos') &&
                   !x.id.startsWith('var_mini6') &&
-                  !x.id.startsWith('var_fortress')
+                  !x.id.startsWith('var_fortress') &&
+                  x.id !== SECRET_REBELLION_VARIANT_ID
               )) {
                 await publishVariantToFirestore(firebaseUser, v).catch(() => {});
               }
@@ -1215,6 +1460,38 @@ export default function App() {
           }
           setShowTutorial(false);
           scrollToPageTop();
+        }}
+      />
+
+      <StreakAndChallengeModal
+        open={challengeModalTab !== null}
+        initialTab={challengeModalTab || 'streak'}
+        profile={state.profile}
+        onClose={() => setChallengeModalTab(null)}
+        onOpenRebellionScene={() => setShowBotRebellionModal(true)}
+      />
+
+      <BotRebellionModal
+        open={showBotRebellionModal}
+        onClose={() => setShowBotRebellionModal(false)}
+        onPlaySecretVariant={() => {
+          setShowBotRebellionModal(false);
+          setState((prev) => {
+            const hasPiece = prev.pieces.some((p) => p.id === SECRET_REBELLION_PIECE.id);
+            const hasVar = prev.variants.some((v) => v.id === SECRET_REBELLION_VARIANT_ID);
+            if (hasPiece && hasVar) return prev;
+            return {
+              ...prev,
+              pieces: hasPiece ? prev.pieces : [SECRET_REBELLION_PIECE, ...prev.pieces],
+              variants: hasVar
+                ? prev.variants
+                : [createSecretRebellionVariant(prev.profile), ...prev.variants],
+            };
+          });
+          setSelectedPlayVariantId(SECRET_REBELLION_VARIANT_ID);
+          setPlayInitialMode('ai');
+          setPlayInitialCompetitive(false);
+          navigateToScreen('play');
         }}
       />
 

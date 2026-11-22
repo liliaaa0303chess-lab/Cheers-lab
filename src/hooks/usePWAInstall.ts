@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { getPublicAppUrl } from '../utils/appUrl';
 
 export interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -80,7 +81,7 @@ export function usePWAInstall() {
   };
 
   const directInstallUrl =
-    typeof window !== 'undefined' ? `${window.location.origin}/?install=1` : '';
+    typeof window !== 'undefined' ? `${getPublicAppUrl()}/?install=1` : '';
 
   return {
     isInstallable: !!deferredPrompt,

@@ -26,6 +26,11 @@ export function createDefaultProfile(): Profile {
     losses: 0,
     discoveredVariants: [],
     variantPlayCounts: {},
+    loginStreak: 0,
+    bestLoginStreak: 0,
+    lastStreakDate: '',
+    botChallenges: {},
+    botRebellionUnlocked: false,
     createdAt: new Date().toISOString(),
   };
 }
@@ -86,8 +91,17 @@ export function loadLocalState(): AppState {
     const mergedVariants = validVariants.length > 0 ? validVariants : blank.variants;
     const mergedPieces = validPieces.length > 0 ? validPieces : blank.pieces;
 
+    const mergedProfile: Profile = {
+      ...blank.profile,
+      ...(parsed.profile || {}),
+      botChallenges:
+        parsed.profile?.botChallenges && typeof parsed.profile.botChallenges === 'object'
+          ? parsed.profile.botChallenges
+          : {},
+    };
+
     return {
-      profile: { ...blank.profile, ...(parsed.profile || {}) },
+      profile: mergedProfile,
       variants: mergedVariants,
       boards: validBoards,
       pieces: mergedPieces,

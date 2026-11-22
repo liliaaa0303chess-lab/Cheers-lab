@@ -31,6 +31,11 @@ import {
   fetchLeaderboardFromFirestore,
   type LeaderboardCard,
 } from '../utils/firestoreSync';
+import {
+  getPublicAppUrl,
+  getStoredPublicAppUrlOverride,
+  setStoredPublicAppUrlOverride,
+} from '../utils/appUrl';
 import { validateFamilyFriendlyText } from '../utils/moderation';
 import { safeUuid } from '../utils/safeId';
 import { playChessSound } from '../utils/sound';
@@ -40,6 +45,8 @@ interface SettingsViewProps {
   profile: Profile;
   settings: AppSettings;
   firebaseUser?: User | null;
+  cloudConnecting?: boolean;
+  cloudAuthError?: string | null;
   onConnectCloud: () => void;
   onDisconnectCloud: () => void;
   onSyncAllNow: () => Promise<void>;
@@ -83,6 +90,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   profile,
   settings,
   firebaseUser,
+  cloudConnecting = false,
+  cloudAuthError = null,
   onConnectCloud,
   onDisconnectCloud,
   onSyncAllNow,
@@ -100,6 +109,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [leaderboard, setLeaderboard] = useState<LeaderboardCard[]>([]);
   const [infoModal, setInfoModal] = useState<'firebase' | 'install' | null>(null);
   const [openSections, setOpenSections] = useState<Partial<Record<SettingsSectionId, boolean>>>({});
+  const [shareUrlInput, setShareUrlInput] = useState<string>(() => getPublicAppUrl());
+  const [editingShareUrl, setEditingShareUrl] = useState(false);
 
   const loadLeaderboard = useCallback(() => {
     fetchLeaderboardFromFirestore()
@@ -243,14 +254,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </button>
             </div>
           ) : (
-            <button
-              type="button"
-              onClick={onConnectCloud}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-sm min-h-[44px]"
-            >
-              <Cloud className="w-4 h-4" />
-              <span>Synchroniser avec Google (Firebase)</span>
-            </button>
+            <div className="space-y-2.5">
+              <button
+                type="button"
+                disabled={cloudConnecting}
+                onClick={onConnectCloud}
+                className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-slate-950 font-semibold text-sm min-h-[44px]"
+              >
+                <Cloud className={`w-4 h-4 ${cloudConnecting ? 'animate-pulse' : ''}`} />
+                <span>
+                  {cloudConnecting ? 'Connexion Google en cours…' : 'Synchroniser avec Google (Firebase)'}
+                </span>
+              </button>
+              {cloudAuthError && (
+                <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 leading-relaxed space-y-1.5">
+                  <p>{cloudAuthError}</p>
+                  {typeof window !== 'undefined' && window.self !== window.top && (
+                    <a
+                      href={window.location.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-block font-semibold text-sky-300 underline"
+                    >
+                      Ouvrir Chess Lab dans un onglet dédié pour autoriser Google
+                    </a>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </section>
 
@@ -278,17 +309,70 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <button
                 type="button"
                 onClick={async () => {
+                  const url = getPublicAppUrl();
                   try {
-                    await navigator.clipboard.writeText(window.location.origin);
-                    onNotify('Lien de l’application copié !');
+                    await navigator.clipboard.writeText(url);
+                    onNotify(`Lien de partage copié : ${url}`);
                   } catch {
-                    onNotify(window.location.origin);
+                    onNotify(url);
                   }
                 }}
                 className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-semibold min-h-[44px]"
               >
                 Copier le lien
               </button>
+            )}
+          </div>
+          <div className="pt-1 space-y-1.5">
+            <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+              <span className="truncate font-mono-num">
+                Lien partagé : {shareUrlInput}
+              </span>
+              <button
+                type="button"
+                onClick={() => setEditingShareUrl((v) => !v)}
+                className="text-sky-400 hover:underline font-medium shrink-0"
+              >
+                {editingShareUrl ? 'Fermer' : 'Modifier'}
+              </button>
+            </div>
+            {editingShareUrl && (
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="url"
+                  value={shareUrlInput}
+                  onChange={(e) => setShareUrlInput(e.target.value)}
+                  placeholder="https://chess-lab.onrender.com"
+                  className="flex-1 min-w-0 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-2.5 py-1.5 text-xs font-mono-num"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const saved = setStoredPublicAppUrlOverride(shareUrlInput);
+                    const nextUrl = saved || getPublicAppUrl();
+                    setShareUrlInput(nextUrl);
+                    setEditingShareUrl(false);
+                    onNotify(`Lien de partage mis à jour : ${nextUrl}`);
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs shrink-0"
+                >
+                  OK
+                </button>
+                {getStoredPublicAppUrlOverride() && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStoredPublicAppUrlOverride('');
+                      setShareUrlInput(getPublicAppUrl());
+                      setEditingShareUrl(false);
+                      onNotify('Lien par défaut rétabli.');
+                    }}
+                    className="px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs shrink-0"
+                  >
+                    Défaut
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </section>

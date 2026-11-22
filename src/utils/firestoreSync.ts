@@ -123,6 +123,27 @@ export async function syncUserProfileToFirestore(
     .slice(0, 500)
     .map((id) => sanitizeId(String(id), 'var'));
 
+  const loginStreak = Math.max(0, Math.min(100000, Math.trunc(profile.loginStreak || 0)));
+  const bestLoginStreak = Math.max(
+    loginStreak,
+    Math.min(100000, Math.trunc(profile.bestLoginStreak || 0))
+  );
+  const lastStreakDate = clampStr(profile.lastStreakDate || '', 16);
+  const botChallenges: Record<string, number[]> = {};
+  if (profile.botChallenges && typeof profile.botChallenges === 'object') {
+    for (const [k, arr] of Object.entries(profile.botChallenges).slice(0, 16)) {
+      if (Array.isArray(arr)) {
+        const cleaned = Array.from(
+          new Set(arr.map((n) => Math.trunc(Number(n))).filter((n) => n >= 1 && n <= 8))
+        ).sort((a, b) => a - b);
+        if (cleaned.length > 0) {
+          botChallenges[sanitizeId(k, 'var')] = cleaned;
+        }
+      }
+    }
+  }
+  const botRebellionUnlocked = Boolean(profile.botRebellionUnlocked);
+
   try {
     const userRef = doc(db, 'users', uid);
     const snap = await getDoc(userRef);
@@ -138,6 +159,11 @@ export async function syncUserProfileToFirestore(
         draws,
         losses,
         discoveredVariants,
+        loginStreak,
+        bestLoginStreak,
+        lastStreakDate,
+        botChallenges,
+        botRebellionUnlocked,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -152,6 +178,11 @@ export async function syncUserProfileToFirestore(
         draws,
         losses,
         discoveredVariants,
+        loginStreak,
+        bestLoginStreak,
+        lastStreakDate,
+        botChallenges,
+        botRebellionUnlocked,
         updatedAt: serverTimestamp(),
       });
     }
@@ -199,6 +230,15 @@ export async function loadUserProfileFromFirestore(
       discoveredVariants: Array.isArray(d.discoveredVariants)
         ? (d.discoveredVariants as string[])
         : undefined,
+      loginStreak: typeof d.loginStreak === 'number' ? d.loginStreak : undefined,
+      bestLoginStreak: typeof d.bestLoginStreak === 'number' ? d.bestLoginStreak : undefined,
+      lastStreakDate: typeof d.lastStreakDate === 'string' ? d.lastStreakDate : undefined,
+      botChallenges:
+        d.botChallenges && typeof d.botChallenges === 'object'
+          ? (d.botChallenges as Record<string, number[]>)
+          : undefined,
+      botRebellionUnlocked:
+        typeof d.botRebellionUnlocked === 'boolean' ? d.botRebellionUnlocked : undefined,
     };
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, path);

@@ -62,10 +62,10 @@ async function queryStockfishMove(
   if (!worker) return null;
 
   const cfg = AI_LEVELS.find((l) => l.level === level) || AI_LEVELS[4];
-  const depth = Math.max(1, Math.min(13, Math.round(cfg.level * 1.2)));
-  const movetime = Math.min(1600, 140 + cfg.level * 130);
+  const depth = Math.max(1, Math.min(19, cfg.depth));
+  const movetime = Math.min(2800, 140 + cfg.level * 130);
   const inOpening = state.moveHistory.length < 14;
-  const multiPv = inOpening ? (cfg.level >= 9 ? 3 : 4) : cfg.level <= 8 ? 2 : 1;
+  const multiPv = cfg.level >= 15 ? 1 : inOpening ? (cfg.level >= 9 ? 3 : 4) : cfg.level <= 8 ? 2 : 1;
 
   return new Promise((resolve) => {
     const legalMoves = getAllLegalMovesForSide(state, getCurrentTurnSide(state), false);
@@ -330,11 +330,11 @@ function computeVariantAiMove(state: GameState, level: AiDifficultyLevel): Legal
   }
   const sorted = shuffled.sort((a, b) => scoreMoveOrdering(state, b) - scoreMoveOrdering(state, a));
   const cfg = AI_LEVELS.find((l) => l.level === level) || AI_LEVELS[4];
-  const searchDepth = level <= 2 ? 1 : level <= 5 ? 2 : level <= 8 ? 3 : 4;
-  const maxTimeMs = level === 10 ? 1500 : 120 + level * 100;
+  const searchDepth = level <= 2 ? 1 : level <= 5 ? 2 : level <= 9 ? 3 : level <= 14 ? 4 : 5;
+  const maxTimeMs = Math.min(2600, 120 + level * 110);
   const deadline = Date.now() + maxTimeMs;
 
-  const candidateLimit = level >= 8 ? 40 : 28;
+  const candidateLimit = level >= 15 ? 48 : level >= 8 ? 40 : 28;
   const candidates = sorted.slice(0, candidateLimit);
   const inOpening = state.moveHistory.length < 12;
 
@@ -345,16 +345,19 @@ function computeVariantAiMove(state: GameState, level: AiDifficultyLevel): Legal
       searchDepth <= 1
         ? evaluateState(next, side)
         : alphabetaTeam(next, searchDepth - 1, -Infinity, Infinity, side, deadline);
-    const jitterAmplitude = inOpening
-      ? cfg.level <= 4
-        ? 45
-        : cfg.level <= 7
-          ? 28
-          : 14
-      : cfg.level <= 5
-        ? 18
-        : 6;
-    const jitter = (Math.random() - 0.5) * jitterAmplitude;
+    const jitterAmplitude =
+      cfg.level >= 15
+        ? 0
+        : inOpening
+          ? cfg.level <= 4
+            ? 45
+            : cfg.level <= 7
+              ? 28
+              : 14
+          : cfg.level <= 5
+            ? 18
+            : 4;
+    const jitter = jitterAmplitude > 0 ? (Math.random() - 0.5) * jitterAmplitude : 0;
     scored.push({ move: m, score: val + jitter });
     if (Date.now() > deadline) break;
   }
@@ -366,13 +369,16 @@ function computeVariantAiMove(state: GameState, level: AiDifficultyLevel): Legal
     return scored[Math.floor(Math.random() * poolSize)].move;
   }
 
-  const tolerance = inOpening
-    ? cfg.level >= 9
-      ? 18
-      : 34
-    : cfg.level >= 9
-      ? 6
-      : 20;
+  const tolerance =
+    cfg.level >= 15
+      ? 0
+      : inOpening
+        ? cfg.level >= 9
+          ? 14
+          : 34
+        : cfg.level >= 9
+          ? 4
+          : 20;
   const bestScore = scored[0].score;
   const tied = scored.filter((s) => s.score >= bestScore - tolerance);
   return tied[Math.floor(Math.random() * tied.length)].move;

@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { getPlayerLevel } from '../engine/eol';
 import type { Profile, Variant } from '../types/chess';
+import { getStreakRank } from '../utils/streaks';
 
 export type ScreenId =
   | 'home'
@@ -27,6 +28,7 @@ interface HomeViewProps {
   recentVariants: Variant[];
   onNavigate: (screen: ScreenId) => void;
   onPlayVariant: (variant: Variant) => void;
+  onOpenChallenges?: (tab?: 'streak' | 'bots') => void;
 }
 
 export const HomeView: React.FC<HomeViewProps> = ({
@@ -35,12 +37,15 @@ export const HomeView: React.FC<HomeViewProps> = ({
   recentVariants,
   onNavigate,
   onPlayVariant,
+  onOpenChallenges,
 }) => {
   const { level, title } = getPlayerLevel(profile.eol, profile.gamesPlayed);
   const winRate =
     profile.gamesPlayed > 0
       ? Math.round((profile.wins / profile.gamesPlayed) * 100)
       : 0;
+  const streak = Math.max(1, profile.loginStreak || 1);
+  const { current: streakRank } = getStreakRank(streak);
 
   const sections: {
     id: ScreenId;
@@ -65,7 +70,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
     {
       id: 'play',
       title: 'Jouer avec sa variante',
-      subtitle: 'Contre un humain, une IA (10 niveaux), en ligne ou analyse libre',
+      subtitle: 'Contre un humain, une IA (20 niveaux), en ligne ou analyse libre',
       icon: <Play className="w-5 h-5" />,
     },
     {
@@ -99,28 +104,58 @@ export const HomeView: React.FC<HomeViewProps> = ({
             </p>
           </div>
 
-          <button
-            type="button"
-            data-tutorial="home-eol-profile"
-            onClick={() => onNavigate('settings')}
-            className="flex items-center gap-3 px-3.5 py-2.5 sm:px-4 sm:py-3 rounded-xl border border-slate-200 dark:border-slate-700/80 bg-slate-50 dark:bg-[#1b2433] hover:border-sky-400/60 transition-colors text-left shrink-0 min-h-[44px]"
-          >
-            <span
-              className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center text-lg sm:text-xl font-bold text-slate-950 shrink-0"
-              style={{ backgroundColor: profile.avatarColor || '#7ebcff' }}
+          <div className="flex flex-col sm:items-end gap-2 shrink-0">
+            <button
+              type="button"
+              data-tutorial="home-eol-profile"
+              onClick={() => onNavigate('settings')}
+              className="flex items-center gap-3 px-3.5 py-2.5 sm:px-4 sm:py-3 rounded-xl border border-slate-200 dark:border-slate-700/80 bg-slate-50 dark:bg-[#1b2433] hover:border-sky-400/60 transition-colors text-left shrink-0 min-h-[44px]"
             >
-              {profile.avatarSymbol || '♔'}
-            </span>
-            <div>
-              <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
-                <User className="w-3.5 h-3.5 text-slate-400" />
-                <span>{profile.nickname || 'Créer un profil'}</span>
+              <span
+                className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center text-lg sm:text-xl font-bold text-slate-950 shrink-0"
+                style={{ backgroundColor: profile.avatarColor || '#7ebcff' }}
+              >
+                {profile.avatarSymbol || '♔'}
+              </span>
+              <div>
+                <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5 text-slate-400" />
+                  <span>{profile.nickname || 'Créer un profil'}</span>
+                </div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
+                  {profile.eol} ÉOL · Niv. {level} ({title})
+                </div>
               </div>
-              <div className="text-xs text-slate-500 dark:text-slate-400 font-mono-num">
-                {profile.eol} ÉOL · Niv. {level} ({title})
+            </button>
+
+            {onOpenChallenges && (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onOpenChallenges('streak')}
+                  title="Série de connexions quotidiennes — Promotion d’échiquier"
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors ${streakRank.bgClass} ${streakRank.borderClass} ${streakRank.colorClass} hover:brightness-110`}
+                >
+                  <span className="text-sm leading-none">{streakRank.symbol}</span>
+                  <span className="font-mono-num">{streak} j</span>
+                  <span className="text-slate-600 dark:text-slate-300 font-medium">
+                    · {streakRank.title}
+                  </span>
+                </button>
+                {profile.botRebellionUnlocked && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenChallenges('bots')}
+                    title="La Grève des 8 Bots"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-xs font-semibold text-amber-300 hover:bg-amber-500/15 transition-colors"
+                  >
+                    <span className="text-sm leading-none">🦄</span>
+                    <span>La Grève des 8 Bots</span>
+                  </button>
+                )}
               </div>
-            </div>
-          </button>
+            )}
+          </div>
         </div>
 
         {/* Métriques de profil en chiffres tabulaires */}

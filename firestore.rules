@@ -50,7 +50,9 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'nickname', 'avatarColor', 'avatarSymbol',
           'eol', 'gamesPlayed', 'wins', 'draws', 'losses',
-          'discoveredVariants', 'createdAt', 'updatedAt'
+          'discoveredVariants', 'loginStreak', 'bestLoginStreak',
+          'lastStreakDate', 'botChallenges', 'botRebellionUnlocked',
+          'createdAt', 'updatedAt'
         ])
         && isValidId(data.uid)
         && data.uid == request.auth.uid
@@ -64,6 +66,11 @@ service cloud.firestore {
         && data.losses is int && data.losses >= 0 && data.losses <= 1000000
         && data.discoveredVariants is list && data.discoveredVariants.size() <= 500
         && (data.discoveredVariants.size() == 0 || (data.discoveredVariants[0] is string && data.discoveredVariants[0].size() <= 128))
+        && (!('loginStreak' in data) || (data.loginStreak is int && data.loginStreak >= 0 && data.loginStreak <= 100000))
+        && (!('bestLoginStreak' in data) || (data.bestLoginStreak is int && data.bestLoginStreak >= 0 && data.bestLoginStreak <= 100000))
+        && (!('lastStreakDate' in data) || (data.lastStreakDate is string && data.lastStreakDate.size() <= 16))
+        && (!('botChallenges' in data) || (data.botChallenges is map && data.botChallenges.size() <= 16))
+        && (!('botRebellionUnlocked' in data) || data.botRebellionUnlocked is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -229,7 +236,9 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'nickname', 'avatarColor', 'avatarSymbol',
           'eol', 'gamesPlayed', 'wins', 'draws', 'losses',
-          'discoveredVariants', 'updatedAt'
+          'discoveredVariants', 'loginStreak', 'bestLoginStreak',
+          'lastStreakDate', 'botChallenges', 'botRebellionUnlocked',
+          'updatedAt'
         ]);
       allow delete: if isOwner(userId) && isValidId(userId);
 

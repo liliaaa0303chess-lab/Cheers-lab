@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import type { BoardConfig, PieceDef, SavedTheme, Variant } from '../types/chess';
 import { fetchVariantLineage } from '../utils/storage';
+import { getPublicAppUrl } from '../utils/appUrl';
 
 interface LibraryViewProps {
   variants: Variant[];
@@ -72,7 +73,7 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
   };
 
   const handleCopyLink = async (v: Variant) => {
-    const url = `${window.location.origin}/?variant=${encodeURIComponent(v.id)}`;
+    const url = `${getPublicAppUrl()}/?variant=${encodeURIComponent(v.id)}`;
     try {
       await navigator.clipboard.writeText(url);
       onNotify('Lien de partage copié !');

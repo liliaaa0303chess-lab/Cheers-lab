@@ -165,8 +165,8 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const aspectRatioScalar = (cols / rows).toFixed(4);
   const boardWidthStyle = fullscreen
     ? isDiagonalRotation
-      ? 'min(68vw, 56dvh)'
-      : `min(94vw, calc((100dvh - 220px) * ${aspectRatioScalar}))`
+      ? 'min(68vw, 50dvh)'
+      : `min(94vw, calc((100dvh - 260px) * ${aspectRatioScalar}))`
     : isDiagonalRotation
       ? `min(70vw, ${Math.round(maxPx * 0.74)}px)`
       : `min(94vw, ${maxPx}px)`;

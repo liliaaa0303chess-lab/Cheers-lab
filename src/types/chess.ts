@@ -187,6 +187,11 @@ export interface Profile {
   losses: number;
   discoveredVariants: string[];
   variantPlayCounts: Record<string, number>;
+  loginStreak?: number;
+  bestLoginStreak?: number;
+  lastStreakDate?: string;
+  botChallenges?: Record<string, number[]>;
+  botRebellionUnlocked?: boolean;
   createdAt: string;
 }
 
@@ -236,6 +241,7 @@ export interface GameRecord {
   creatorName?: string;
   opponentName: string;
   opponentEol?: number;
+  aiLevel?: AiDifficultyLevel;
   playerSide?: PlayerSide;
   result: 'win' | 'loss' | 'draw' | 'saved';
   reason?: string;
@@ -284,7 +290,27 @@ export interface AppState {
 
 export type GameMode = 'local' | 'ai' | 'online' | 'analysis';
 
-export type AiDifficultyLevel = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+export type AiDifficultyLevel =
+  | 1
+  | 2
+  | 3
+  | 4
+  | 5
+  | 6
+  | 7
+  | 8
+  | 9
+  | 10
+  | 11
+  | 12
+  | 13
+  | 14
+  | 15
+  | 16
+  | 17
+  | 18
+  | 19
+  | 20;
 
 export const AI_LEVELS: {
   level: AiDifficultyLevel;
@@ -294,15 +320,25 @@ export const AI_LEVELS: {
   stockfishSkill: number;
 }[] = [
   { level: 1, label: 'Très facile', approxEol: 250, depth: 1, stockfishSkill: 0 },
-  { level: 2, label: 'Facile', approxEol: 325, depth: 1, stockfishSkill: 2 },
-  { level: 3, label: 'Petit joueur', approxEol: 400, depth: 2, stockfishSkill: 4 },
-  { level: 4, label: 'Débutant', approxEol: 500, depth: 2, stockfishSkill: 6 },
-  { level: 5, label: 'Intermédiaire', approxEol: 650, depth: 2, stockfishSkill: 8 },
-  { level: 6, label: 'Confirmé', approxEol: 825, depth: 3, stockfishSkill: 11 },
-  { level: 7, label: 'Avancé', approxEol: 1025, depth: 3, stockfishSkill: 14 },
-  { level: 8, label: 'Difficile', approxEol: 1250, depth: 3, stockfishSkill: 16 },
-  { level: 9, label: 'Expert', approxEol: 1500, depth: 4, stockfishSkill: 18 },
-  { level: 10, label: 'Maître', approxEol: 1800, depth: 4, stockfishSkill: 20 },
+  { level: 2, label: 'Facile', approxEol: 325, depth: 1, stockfishSkill: 1 },
+  { level: 3, label: 'Petit joueur', approxEol: 400, depth: 2, stockfishSkill: 2 },
+  { level: 4, label: 'Débutant', approxEol: 500, depth: 2, stockfishSkill: 4 },
+  { level: 5, label: 'Intermédiaire', approxEol: 650, depth: 2, stockfishSkill: 5 },
+  { level: 6, label: 'Confirmé', approxEol: 825, depth: 3, stockfishSkill: 7 },
+  { level: 7, label: 'Avancé', approxEol: 1025, depth: 3, stockfishSkill: 9 },
+  { level: 8, label: 'Difficile', approxEol: 1250, depth: 3, stockfishSkill: 11 },
+  { level: 9, label: 'Expert', approxEol: 1500, depth: 4, stockfishSkill: 13 },
+  { level: 10, label: 'Maître', approxEol: 1800, depth: 4, stockfishSkill: 15 },
+  { level: 11, label: 'Maître FIDE', approxEol: 1980, depth: 5, stockfishSkill: 16 },
+  { level: 12, label: 'Maître Int.', approxEol: 2150, depth: 6, stockfishSkill: 17 },
+  { level: 13, label: 'Grand Maître', approxEol: 2320, depth: 7, stockfishSkill: 18 },
+  { level: 14, label: 'Super GM', approxEol: 2500, depth: 8, stockfishSkill: 19 },
+  { level: 15, label: 'Élite Mondiale', approxEol: 2680, depth: 10, stockfishSkill: 20 },
+  { level: 16, label: 'Champion', approxEol: 2860, depth: 11, stockfishSkill: 20 },
+  { level: 17, label: 'Titan', approxEol: 3040, depth: 13, stockfishSkill: 20 },
+  { level: 18, label: 'Oracle', approxEol: 3220, depth: 15, stockfishSkill: 20 },
+  { level: 19, label: 'Surhumain', approxEol: 3410, depth: 17, stockfishSkill: 20 },
+  { level: 20, label: 'Divinité Stockfish', approxEol: 3600, depth: 19, stockfishSkill: 20 },
 ];
 
 export function getClosestAiLevelForEol(eol: number): AiDifficultyLevel {

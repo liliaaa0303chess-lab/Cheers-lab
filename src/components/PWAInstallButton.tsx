@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
+import { getPublicAppUrl } from '../utils/appUrl';
 
 interface PWAInstallButtonProps {
   compact?: boolean;
@@ -34,7 +35,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
     return null;
   }
 
-  const appUrl = typeof window !== 'undefined' ? window.location.origin : '';
+  const appUrl = typeof window !== 'undefined' ? getPublicAppUrl() : '';
 
   const handleClick = async () => {
     if (isInstallable) {

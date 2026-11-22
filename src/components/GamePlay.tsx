@@ -68,6 +68,7 @@ import {
   loadActiveOnlineSession,
   saveActiveOnlineSession,
 } from '../utils/storage';
+import { getPublicAppUrl } from '../utils/appUrl';
 import { ChessBoard } from './ChessBoard';
 import { VariantRulesSummary } from './VariantRulesSummary';
 
@@ -119,6 +120,7 @@ interface GamePlayProps {
   onFinishGame: (record: GameRecord, updatedEol?: number) => void;
   onRateVariant: (variantId: string, stars: number) => void;
   onClearOnlineRoom?: () => void;
+  onOpenChallenges?: (tab?: 'streak' | 'bots') => void;
   onNotify: (msg: string) => void;
 }
 
@@ -210,6 +212,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
   onFinishGame,
   onRateVariant,
   onClearOnlineRoom,
+  onOpenChallenges,
   onNotify,
 }) => {
   const activeVariant = useMemo(
@@ -664,9 +667,11 @@ export const GamePlay: React.FC<GamePlayProps> = ({
           (lvl) => AI_LEVELS.find((l) => l.level === lvl)?.approxEol || 400
         );
         const avg = Math.round(eols.reduce((a, b) => a + b, 0) / eols.length);
-        const firstMeta = AI_LEVELS.find((l) => l.level === levelsUsed[0]) || AI_LEVELS[2];
+        const firstLevel = levelsUsed[0];
+        const firstMeta = AI_LEVELS.find((l) => l.level === firstLevel) || AI_LEVELS[2];
         return {
           eol: avg,
+          aiLevel: firstLevel,
           name:
             levelsUsed.length > 1
               ? `${levelsUsed.length} IA (~${avg} ÉOL)`
@@ -676,6 +681,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       }
       return {
         eol: Math.max(300, profile.eol),
+        aiLevel: undefined,
         name: gameState.activeSides.length > 2 ? 'Joueurs locaux' : 'Joueur local',
         isCreator: false,
       };
@@ -718,6 +724,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         creatorName: gameState.variant.creator,
         opponentName: oppStats.name,
         opponentEol: oppStats.eol,
+        ...(oppStats.aiLevel ? { aiLevel: oppStats.aiLevel } : {}),
         playerSide: mySide,
         result,
         reason: gameState.endReason || undefined,
@@ -745,6 +752,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         variantSnapshot: gameState.variant,
         creatorName: gameState.variant.creator,
         opponentName: oppStats.name,
+        ...(oppStats.aiLevel ? { aiLevel: oppStats.aiLevel } : {}),
         playerSide: mySide,
         result,
         reason: gameState.endReason || undefined,
@@ -1436,7 +1444,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     const text =
       kind === 'code'
         ? code
-        : `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(code)}`;
+        : `${getPublicAppUrl()}/?room=${encodeURIComponent(code)}`;
     try {
       await navigator.clipboard.writeText(text);
       setCopiedHint(kind);
@@ -2220,6 +2228,19 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                       </option>
                     ))}
                   </select>
+                  {onOpenChallenges && profile.botRebellionUnlocked && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenChallenges('bots')}
+                      className="w-full flex items-center justify-between text-[11px] rounded-lg border border-amber-400/30 bg-amber-500/10 hover:bg-amber-500/15 px-2.5 py-1.5 text-amber-200 transition-colors"
+                    >
+                      <span className="flex items-center gap-1.5 font-medium">
+                        <Trophy className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        <span>La Grève des 8 Bots débloquée</span>
+                      </span>
+                      <span className="font-semibold text-amber-300 shrink-0">Voir</span>
+                    </button>
+                  )}
                 </div>
 
                 {extraPlayersCount > 0 && (
@@ -2564,46 +2585,32 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       {/* Mode Grand écran : mise en page verrouillée (aucun saut lors de la sélection d'une pièce) */}
       {phase !== 'lobby' && gameState && isFullscreen && (
         <div
-          className="fixed inset-0 z-50 h-dvh w-screen bg-[#070b11] text-slate-100 flex flex-col items-center justify-between gap-2 p-2 sm:p-4 overflow-hidden overscroll-none"
+          className="fixed inset-0 z-50 h-dvh w-screen bg-[#070b11] text-slate-100 flex flex-col items-center justify-between gap-1.5 sm:gap-2 px-2 sm:px-4 pt-[max(0.5rem,env(safe-area-inset-top))] pb-[max(0.5rem,env(safe-area-inset-bottom))] overflow-hidden overscroll-none"
           style={{ overflowAnchor: 'none' }}
         >
-          {/* Barre supérieure à hauteur fixe */}
-          <div
-            className={`w-full max-w-6xl h-14 shrink-0 flex items-center justify-between gap-2 px-3 rounded-2xl border overflow-x-auto flex-nowrap ${
-              isOpponentTurn
-                ? 'border-sky-400/70 bg-sky-500/10'
-                : 'border-slate-800 bg-[#121923]'
-            }`}
-          >
-            <div className="flex items-center gap-2 min-w-0 shrink">
-              <span className={`w-3 h-3 rounded-full border shrink-0 ${SIDE_SWATCH[topClockSide]}`} />
-              <span className="text-xs sm:text-sm font-semibold truncate">{opponentLabel}</span>
-              {renderClockBadge(topClockSide, isOpponentTurn)}
-              {aiThinking && (
-                <span className="text-xs font-semibold text-sky-300 whitespace-nowrap shrink-0">
-                  Réflexion…
-                </span>
-              )}
-            </div>
-
-            <div className="flex items-center gap-1.5 shrink-0">
+          {/* Ligne utilitaire supérieure : boutons d'action (jamais de collision avec la pendule) */}
+          <div className="w-full max-w-6xl shrink-0 flex items-center justify-between gap-2">
+            <span className="hidden sm:inline-block text-xs font-medium text-slate-400 truncate">
+              {gameState.variant.name}
+            </span>
+            <div className="flex items-center justify-end gap-1.5 flex-wrap ml-auto">
               {(mode === 'ai' || mode === 'local') && phase === 'playing' && (
                 <button
                   type="button"
                   onClick={handleUndo}
                   disabled={!canUndo}
-                  className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs sm:text-sm min-h-[38px] disabled:opacity-40 whitespace-nowrap"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs min-h-[36px] disabled:opacity-40 whitespace-nowrap"
                 >
-                  <Undo2 className="w-4 h-4 text-sky-400" />
+                  <Undo2 className="w-3.5 h-3.5 text-sky-400" />
                   <span>Annuler</span>
                 </button>
               )}
               <button
                 type="button"
                 onClick={() => setShowRulesModal(true)}
-                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs sm:text-sm min-h-[38px] whitespace-nowrap"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs min-h-[36px] whitespace-nowrap"
               >
-                <Info className="w-4 h-4 text-sky-400" />
+                <Info className="w-3.5 h-3.5 text-sky-400" />
                 <span>Règles</span>
               </button>
               {mode !== 'analysis' && phase === 'playing' && (
@@ -2611,18 +2618,18 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                   <button
                     type="button"
                     onClick={handleOfferDraw}
-                    className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs sm:text-sm min-h-[38px] whitespace-nowrap"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-700 bg-[#0d131d] text-xs min-h-[36px] whitespace-nowrap"
                   >
-                    <Handshake className="w-4 h-4 text-amber-400" />
+                    <Handshake className="w-3.5 h-3.5 text-amber-400" />
                     <span className="hidden sm:inline">Proposer nulle</span>
                     <span className="sm:hidden">Nulle</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => setShowResignConfirm(true)}
-                    className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border border-rose-500/40 bg-rose-500/15 text-rose-300 text-xs sm:text-sm min-h-[38px] whitespace-nowrap"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-rose-500/40 bg-rose-500/15 text-rose-300 text-xs min-h-[36px] whitespace-nowrap"
                   >
-                    <Flag className="w-4 h-4" />
+                    <Flag className="w-3.5 h-3.5" />
                     <span className="hidden sm:inline">Abandonner</span>
                   </button>
                 </>
@@ -2630,12 +2637,35 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               <button
                 type="button"
                 onClick={() => setIsFullscreen(false)}
-                className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs sm:text-sm min-h-[38px] whitespace-nowrap"
+                className="inline-flex items-center gap-1 px-2.5 sm:px-3 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold text-xs min-h-[36px] whitespace-nowrap"
               >
-                <Minimize2 className="w-4 h-4" />
-                <span>Diminuer l’écran</span>
+                <Minimize2 className="w-3.5 h-3.5" />
+                <span>Diminuer</span>
+                <span className="hidden sm:inline">l’écran</span>
               </button>
             </div>
+          </div>
+
+          {/* Barre adversaire dédiée : nom + pendule toujours visibles sur tous les écrans */}
+          <div
+            className={`w-full max-w-6xl min-h-[48px] sm:h-14 shrink-0 flex items-center justify-between gap-2 px-3.5 rounded-2xl border ${
+              isOpponentTurn
+                ? 'border-sky-400/70 bg-sky-500/10 shadow-[0_0_20px_rgba(56,189,248,0.18)]'
+                : 'border-slate-800 bg-[#121923]'
+            }`}
+          >
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <span className={`w-3.5 h-3.5 rounded-full border shrink-0 ${SIDE_SWATCH[topClockSide]}`} />
+              <span className="text-xs sm:text-sm font-bold text-white truncate">
+                {opponentLabel}
+              </span>
+              {aiThinking && (
+                <span className="text-xs font-semibold text-sky-300 whitespace-nowrap shrink-0">
+                  Réflexion…
+                </span>
+              )}
+            </div>
+            {renderClockBadge(topClockSide, isOpponentTurn, true)}
           </div>
 
           {renderDisconnectBanner()}
