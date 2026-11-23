@@ -20,6 +20,7 @@ import {
   isSpecialEntryAllowed,
   isSquareColorAllowed,
   parsePieceTextConfig,
+  resolveDynamicSpecialEffect,
   type CompiledVariantRules,
 } from './ruleParser.ts';
 
@@ -43,6 +44,7 @@ export interface BoardPieceInstance {
   invisibleTurns: number;
   frozenTurns: number;
   powerUsesLeft: number;
+  capturesMade?: number;
 }
 
 export interface LegalMove {
@@ -50,7 +52,11 @@ export interface LegalMove {
   to: number;
   captureIndex?: number;
   isCastle?: 'kingside' | 'queenside';
+  castleRookFrom?: number;
+  castleRookTo?: number;
   isEnPassant?: boolean;
+  isDrop?: boolean;
+  dropPieceId?: string;
   promotionPieceId?: string;
   isPower?: SpecialPowerType;
   powerTarget?: number;
@@ -72,6 +78,7 @@ export interface GameState {
   enPassantVictim: number | null;
   capturesCount: Record<PlayerSide, number>;
   checksDelivered: Record<PlayerSide, number>;
+  capturedReserve: Record<PlayerSide, string[]>;
   lastMove: { from: number; to: number; description?: string } | null;
   moveHistory: string[];
   winner: PlayerSide | 'draw' | null;
@@ -80,6 +87,7 @@ export interface GameState {
   inCheckSides: PlayerSide[];
   customPieceMap: Record<string, PieceDef>;
   compiledRules: CompiledVariantRules;
+  forwardDirections: Record<PlayerSide, [number, number]>;
 }
 
 const BUILTIN_MAP: Record<string, { name: string; symbolWhite: string; symbolBlack: string; value: number; isKing?: boolean }> = {
@@ -224,11 +232,21 @@ export function createInitialGameState(
 
   const compiledRules = compileVariantRules(variant, allCustomPieces);
   const requestedCount = Math.max(2, Math.min(6, variant.players || 2));
-  const activeSides = [...compiledRules.turnOrderSides].slice(0, requestedCount);
+  const activeSides =
+    presentSides.size >= 2
+      ? [...compiledRules.turnOrderSides].filter((s) => presentSides.has(s))
+      : [...compiledRules.turnOrderSides].slice(0, requestedCount);
   // Ensure any side present on board is included
   for (const s of presentSides) {
     if (!activeSides.includes(s)) activeSides.push(s);
   }
+
+  const forwardDirections = inferSideForwardDirections(
+    pieces,
+    variant.board,
+    customPieceMap,
+    compiledRules
+  );
 
   const zeroCounters = (): Record<PlayerSide, number> => ({
     white: 0,
@@ -257,6 +275,14 @@ export function createInitialGameState(
     enPassantVictim: null,
     capturesCount: zeroCounters(),
     checksDelivered: zeroCounters(),
+    capturedReserve: {
+      white: [],
+      black: [],
+      red: [],
+      blue: [],
+      green: [],
+      gold: [],
+    },
     lastMove: null,
     moveHistory: [],
     winner: null,
@@ -265,6 +291,7 @@ export function createInitialGameState(
     inCheckSides: [],
     customPieceMap,
     compiledRules,
+    forwardDirections,
   };
 
   state.inCheckSides = compiledRules.noCheckRestriction ? [] : computeInCheckSides(state);
@@ -284,9 +311,27 @@ export function cloneGameState(state: GameState): GameState {
     winningTeam: state.winningTeam ? [...state.winningTeam] : null,
     capturesCount: { ...state.capturesCount },
     checksDelivered: { ...(state.checksDelivered || { white: 0, black: 0, red: 0, blue: 0, green: 0, gold: 0 }) },
+    capturedReserve: {
+      white: [...(state.capturedReserve?.white || [])],
+      black: [...(state.capturedReserve?.black || [])],
+      red: [...(state.capturedReserve?.red || [])],
+      blue: [...(state.capturedReserve?.blue || [])],
+      green: [...(state.capturedReserve?.green || [])],
+      gold: [...(state.capturedReserve?.gold || [])],
+    },
     moveHistory: [...state.moveHistory],
     inCheckSides: [...state.inCheckSides],
     lastMove: state.lastMove ? { ...state.lastMove } : null,
+    forwardDirections: state.forwardDirections
+      ? {
+          white: [...state.forwardDirections.white] as [number, number],
+          black: [...state.forwardDirections.black] as [number, number],
+          red: [...state.forwardDirections.red] as [number, number],
+          blue: [...state.forwardDirections.blue] as [number, number],
+          green: [...state.forwardDirections.green] as [number, number],
+          gold: [...state.forwardDirections.gold] as [number, number],
+        }
+      : { ...DEFAULT_FORWARD_DIRECTIONS },
   };
 }
 
@@ -329,6 +374,9 @@ export function isStandardChessCompatible(
 
 export function toFen(state: GameState): string | null {
   if (!isStandardChessCompatible(state.variant)) return null;
+  const wf = getForwardDirection(state, 'white');
+  const bf = getForwardDirection(state, 'black');
+  if (wf[0] !== -1 || wf[1] !== 0 || bf[0] !== 1 || bf[1] !== 0) return null;
   const charMap: Record<string, string> = {
     'builtin:K': 'k',
     'builtin:Q': 'q',
@@ -400,21 +448,205 @@ export function uciToSquare(uciSq: string, cols = 8, rows = 8): number {
   return r * cols + c;
 }
 
-function getForwardDirection(side: PlayerSide): [number, number] {
-  switch (side) {
-    case 'white':
-      return [-1, 0];
-    case 'black':
-      return [1, 0];
-    case 'red':
-      return [0, 1];
-    case 'blue':
-      return [0, -1];
-    case 'green':
-      return [-1, 0];
-    case 'gold':
-      return [1, 0];
+const DEFAULT_FORWARD_DIRECTIONS: Record<PlayerSide, [number, number]> = {
+  white: [-1, 0],
+  black: [1, 0],
+  red: [0, 1],
+  blue: [0, -1],
+  green: [-1, 0],
+  gold: [1, 0],
+};
+
+function isPawnLikeForOrientation(
+  pieceId: string,
+  customPieceMap: Record<string, PieceDef>
+): boolean {
+  if (pieceId === 'builtin:P') return true;
+  const def = customPieceMap[pieceId];
+  if (!def) return false;
+  if (def.moves?.pawn) return true;
+  return parsePieceTextConfig(def).berolina;
+}
+
+export function inferSideForwardDirections(
+  piecesOrSetup:
+    | Record<number, { pieceId: string; side: PlayerSide }>
+    | Record<number, string>,
+  board: BoardConfig,
+  customPieceMap: Record<string, PieceDef> = {},
+  compiledRules?: CompiledVariantRules
+): Record<PlayerSide, [number, number]> {
+  const result: Record<PlayerSide, [number, number]> = {
+    white: [...DEFAULT_FORWARD_DIRECTIONS.white] as [number, number],
+    black: [...DEFAULT_FORWARD_DIRECTIONS.black] as [number, number],
+    red: [...DEFAULT_FORWARD_DIRECTIONS.red] as [number, number],
+    blue: [...DEFAULT_FORWARD_DIRECTIONS.blue] as [number, number],
+    green: [...DEFAULT_FORWARD_DIRECTIONS.green] as [number, number],
+    gold: [...DEFAULT_FORWARD_DIRECTIONS.gold] as [number, number],
+  };
+
+  const rows = Math.max(2, board.rows || 8);
+  const cols = Math.max(2, board.cols || 8);
+
+  const bySide: Partial<
+    Record<
+      PlayerSide,
+      {
+        all: { r: number; c: number }[];
+        pawns: { r: number; c: number }[];
+        back: { r: number; c: number }[];
+      }
+    >
+  > = {};
+
+  for (const [idxStr, val] of Object.entries(piecesOrSetup || {})) {
+    const idx = Number(idxStr);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= rows * cols) continue;
+    const ref: { pieceId: string; side: PlayerSide } | null =
+      typeof val === 'string'
+        ? normalizePieceRef(val)
+        : (val as { pieceId: string; side: PlayerSide } | null);
+    if (!ref || !ref.side) continue;
+    const r = Math.floor(idx / cols);
+    const c = idx % cols;
+    const side: PlayerSide = ref.side;
+    if (!bySide[side]) {
+      bySide[side] = { all: [], pawns: [], back: [] };
+    }
+    const bucket = bySide[side]!;
+    const pt = { r, c };
+    bucket.all.push(pt);
+    if (isPawnLikeForOrientation(ref.pieceId, customPieceMap)) {
+      bucket.pawns.push(pt);
+    } else {
+      bucket.back.push(pt);
+    }
   }
+
+  const presentSides = Object.keys(bySide) as PlayerSide[];
+  if (presentSides.length === 0) return result;
+
+  const mean = (pts: { r: number; c: number }[]) => {
+    const sum = pts.reduce((acc, p) => ({ r: acc.r + p.r, c: acc.c + p.c }), { r: 0, c: 0 });
+    return { r: sum.r / pts.length, c: sum.c / pts.length };
+  };
+
+  for (const side of presentSides) {
+    const bucket = bySide[side]!;
+
+    // Indice 1 : position des pions par rapport à l'arrière-garde du même camp
+    if (bucket.pawns.length > 0 && bucket.back.length > 0) {
+      const pMean = mean(bucket.pawns);
+      const bMean = mean(bucket.back);
+      const dr = pMean.r - bMean.r;
+      const dc = pMean.c - bMean.c;
+      if (Math.abs(dr) >= 0.35 || Math.abs(dc) >= 0.35) {
+        if (Math.abs(dr) >= Math.abs(dc)) {
+          result[side] = [dr >= 0 ? 1 : -1, 0];
+        } else {
+          result[side] = [0, dc >= 0 ? 1 : -1];
+        }
+        continue;
+      }
+    }
+
+    // Indice 2 : direction vers le barycentre des camps adverses (si >= 2 camps présents)
+    if (presentSides.length >= 2) {
+      const enemyPts: { r: number; c: number }[] = [];
+      for (const other of presentSides) {
+        if (other === side) continue;
+        if (compiledRules && areSidesAllied(compiledRules, side, other)) continue;
+        enemyPts.push(...bySide[other]!.all);
+      }
+      if (enemyPts.length === 0) {
+        for (const other of presentSides) {
+          if (other !== side) enemyPts.push(...bySide[other]!.all);
+        }
+      }
+      if (enemyPts.length > 0) {
+        const ownMean = mean(bucket.all);
+        const enemyMean = mean(enemyPts);
+        const dr = enemyMean.r - ownMean.r;
+        const dc = enemyMean.c - ownMean.c;
+        if (Math.abs(dr) >= 0.25 || Math.abs(dc) >= 0.25) {
+          if (Math.abs(Math.abs(dr) - Math.abs(dc)) < 0.35) {
+            // Départage selon la proximité du bord du camp (pousser vers l'intérieur)
+            const edgeBiasR = Math.min(ownMean.r, rows - 1 - ownMean.r);
+            const edgeBiasC = Math.min(ownMean.c, cols - 1 - ownMean.c);
+            if (edgeBiasR <= edgeBiasC) {
+              result[side] = [dr >= 0 ? 1 : -1, 0];
+            } else {
+              result[side] = [0, dc >= 0 ? 1 : -1];
+            }
+          } else if (Math.abs(dr) >= Math.abs(dc)) {
+            result[side] = [dr >= 0 ? 1 : -1, 0];
+          } else {
+            result[side] = [0, dc >= 0 ? 1 : -1];
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+export function getForwardDirection(
+  state: Pick<GameState, 'forwardDirections'> | null | undefined,
+  side: PlayerSide
+): [number, number] {
+  return state?.forwardDirections?.[side] || DEFAULT_FORWARD_DIRECTIONS[side];
+}
+
+export function getPromotionChoicesForState(state: GameState): string[] {
+  const rules = getStateRules(state);
+  if (rules.disablePromotion) return [];
+  if (rules.promoteToPieceId) return [rules.promoteToPieceId];
+
+  const choices = ['builtin:Q', 'builtin:R', 'builtin:B', 'builtin:N'];
+  const variantCustomIds = new Set<string>();
+  for (const d of state.variant.customPieceDefs || []) {
+    if (d?.id) variantCustomIds.add(d.id);
+  }
+  for (const raw of Object.values(state.variant.setup || {})) {
+    if (typeof raw === 'string') {
+      const { pieceId } = normalizePieceRef(raw);
+      if (!pieceId.startsWith('builtin:')) variantCustomIds.add(pieceId);
+    }
+  }
+  for (const pid of variantCustomIds) {
+    if (choices.includes(pid)) continue;
+    const def = state.customPieceMap[pid];
+    if (!def) continue;
+    if (isKingPiece(pid, state.customPieceMap)) continue;
+    const isPurePawn =
+      Boolean(def.moves?.pawn) &&
+      !def.moves?.rook &&
+      !def.moves?.bishop &&
+      !def.moves?.knight &&
+      !def.moves?.king;
+    if (isPurePawn) continue;
+    choices.push(pid);
+  }
+  return choices;
+}
+
+function isFurthestForwardSquare(
+  board: BoardConfig,
+  r: number,
+  c: number,
+  fdr: number,
+  fdc: number
+): boolean {
+  const { rows, cols, cells } = board;
+  let nr = r + fdr;
+  let nc = c + fdc;
+  while (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+    if (cells[nr * cols + nc] !== 0) return false;
+    nr += fdr;
+    nc += fdc;
+  }
+  return true;
 }
 
 function getPseudoMovesForPiece(
@@ -428,30 +660,70 @@ function getPseudoMovesForPiece(
   if (!piece || piece.frozenTurns > 0) return [];
 
   const rules = getStateRules(state);
-  if (
+  const capCount = piece.capturesMade || 0;
+  const immobileByCaptureEvo =
     !ignoreVariantRules &&
     !forDefenseCheck &&
-    rules.immobilePieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side))
+    (rules.pieceEvolutionOnCaptures || []).some(
+      (evo) =>
+        evo.becomeImmobile &&
+        capCount >= evo.threshold &&
+        doesPieceMatchFilter(piece.pieceId, evo.filter, piece.side)
+    );
+  const immobileByTurn =
+    !ignoreVariantRules &&
+    !forDefenseCheck &&
+    (rules.timedRules || []).some(
+      (tr) =>
+        tr.kind === 'global_immobile_until' &&
+        state.fullMoveNumber < tr.turnThreshold &&
+        doesPieceMatchFilter(piece.pieceId, tr.targetFilter || 'all', piece.side)
+    );
+  if (
+    immobileByCaptureEvo ||
+    immobileByTurn ||
+    (!ignoreVariantRules &&
+      !forDefenseCheck &&
+      rules.immobilePieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side)))
   ) {
     return [];
   }
+
+  const unlockedBackwardByTurn =
+    !ignoreVariantRules &&
+    (rules.timedRules || []).some(
+      (tr) =>
+        tr.kind === 'unlock_backward_after' &&
+        state.fullMoveNumber >= tr.turnThreshold &&
+        doesPieceMatchFilter(piece.pieceId, tr.targetFilter || 'all', piece.side)
+    );
+  const enabledJumpByTurn =
+    !ignoreVariantRules &&
+    (rules.timedRules || []).some(
+      (tr) =>
+        tr.kind === 'enable_jump_after' &&
+        state.fullMoveNumber >= tr.turnThreshold &&
+        doesPieceMatchFilter(piece.pieceId, tr.targetFilter || 'all', piece.side)
+    );
 
   const customDef = state.customPieceMap[piece.pieceId];
   const allCustomPieces = Object.values(state.customPieceMap || {});
   const { rows, cols } = state.board;
   const r0 = Math.floor(from / cols);
   const c0 = from % cols;
-  const [fdr, fdc] = getForwardDirection(piece.side);
+  const [fdr, fdc] = getForwardDirection(state, piece.side);
   const moves: LegalMove[] = [];
 
   const jumpForbidden =
     !ignoreVariantRules &&
+    !enabledJumpByTurn &&
     rules.forbidJumpPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side));
 
   const globalCanJump =
     !ignoreVariantRules &&
     !jumpForbidden &&
-    (rules.allCanJump ||
+    (enabledJumpByTurn ||
+      rules.allCanJump ||
       rules.canJumpPieces.some((f) => doesPieceMatchFilter(piece.pieceId, f, piece.side)));
 
   const pieceStepCap = !ignoreVariantRules
@@ -483,6 +755,7 @@ function getPseudoMovesForPiece(
     const dot = drFromStart * fdr + dcFromStart * fdc;
     if (
       dot < 0 &&
+      !unlockedBackwardByTurn &&
       isPieceBackwardForbidden(rules, piece.pieceId, from, to, state.board, customDef, piece.side)
     ) {
       return false;
@@ -697,7 +970,9 @@ function getPseudoMovesForPiece(
       const isBerolina = !ignoreVariantRules && rules.berolinaPawns;
       const pawnCanMoveBackward =
         !ignoreVariantRules &&
-        (rules.allowPawnBackward || (rules.allowPawnBackwardSides || []).includes(piece.side));
+        (unlockedBackwardByTurn ||
+          rules.allowPawnBackward ||
+          (rules.allowPawnBackwardSides || []).includes(piece.side));
 
       if (isBerolina) {
         // Berolina pawn: steps diagonally forward (or backward if allowPawnBackward), captures straight forward
@@ -718,11 +993,7 @@ function getPseudoMovesForPiece(
             const c1 = wrapCol(c0 + dc);
             if (c1 === null) continue;
             const to1 = r1 * cols + c1;
-            const isPromo =
-              (fdr === -1 && r1 === 0) ||
-              (fdr === 1 && r1 === rows - 1) ||
-              (fdc === 1 && c1 === cols - 1) ||
-              (fdc === -1 && c1 === 0);
+            const isPromo = isFurthestForwardSquare(state.board, r1, c1, fdr, fdc);
             if (
               isCellPlayable(state.board, to1) &&
               !state.pieces[to1] &&
@@ -738,11 +1009,7 @@ function getPseudoMovesForPiece(
         if (capR >= 0 && capR < rows && capC !== null) {
           const to = capR * cols + capC;
           const target = state.pieces[to];
-          const isPromo =
-            (fdr === -1 && capR === 0) ||
-            (fdr === 1 && capR === rows - 1) ||
-            (fdc === 1 && capC === cols - 1) ||
-            (fdc === -1 && capC === 0);
+          const isPromo = isFurthestForwardSquare(state.board, capR, capC, fdr, fdc);
           if (isCellPlayable(state.board, to) && isDirectionPermitted(fdr, fdc, to) && isEntryPermitted(to)) {
             if (forAttackCheck || forDefenseCheck) {
               if (!target || canCaptureVictim(target.pieceId, to, fdr, fdc)) {
@@ -773,11 +1040,7 @@ function getPseudoMovesForPiece(
             const to1 = r1 * cols + c1;
             if (isCellPlayable(state.board, to1)) {
               const target1 = state.pieces[to1];
-              const isPromo =
-                (fdr === -1 && r1 === 0) ||
-                (fdr === 1 && r1 === rows - 1) ||
-                (fdc === 1 && c1 === cols - 1) ||
-                (fdc === -1 && c1 === 0);
+              const isPromo = isFurthestForwardSquare(state.board, r1, c1, fdr, fdc);
               if (!target1 && isDirectionPermitted(fdr, fdc, to1) && isEntryPermitted(to1)) {
                 moves.push({
                   from,
@@ -806,7 +1069,12 @@ function getPseudoMovesForPiece(
                     isDirectionPermitted(fdr * step, fdc * step, toN) &&
                     isEntryPermitted(toN)
                   ) {
-                    moves.push({ from, to: toN });
+                    const isPromoN = isFurthestForwardSquare(state.board, rN, cN, fdr, fdc);
+                    moves.push({
+                      from,
+                      to: toN,
+                      promotionPieceId: isPromoN ? promoId : undefined,
+                    });
                   } else {
                     break;
                   }
@@ -890,11 +1158,7 @@ function getPseudoMovesForPiece(
           if (!isEntryPermitted(to)) continue;
 
           const target = state.pieces[to];
-          const isPromo =
-            (fdr === -1 && nr === 0) ||
-            (fdr === 1 && nr === rows - 1) ||
-            (fdc === 1 && nc === cols - 1) ||
-            (fdc === -1 && nc === 0);
+          const isPromo = isFurthestForwardSquare(state.board, nr, nc, fdr, fdc);
 
           if (forAttackCheck || forDefenseCheck) {
             if (!target || (isTargetSideCapturable(target.side) && canCaptureVictim(target.pieceId, to, dr, dc))) {
@@ -986,64 +1250,124 @@ function getPseudoMovesForPiece(
     emitTemplateMoves('builtin:N', false);
   } else if (piece.pieceId === 'builtin:K') {
     emitTemplateMoves('builtin:K', true);
-    // Castling on standard-compatible row (unless disabled by variant rules)
+    // Flexible castling: supports any board size (>= 4), non-standard rook columns, and vertical/horizontal orientations
     if (
       !forAttackCheck &&
       !forDefenseCheck &&
       (ignoreVariantRules || !rules.disableCastling) &&
-      !piece.hasMoved &&
-      rows >= 8 &&
-      cols >= 8
+      !piece.hasMoved
     ) {
-      const homeRow = piece.side === 'white' ? rows - 1 : piece.side === 'black' ? 0 : -1;
-      if (r0 === homeRow && c0 === 4) {
-        // Kingside
-        const rIdx = homeRow * cols + 7;
-        const rook = state.pieces[rIdx];
-        const kCastleTo = homeRow * cols + 6;
-        if (
-          rook &&
-          rook.side === piece.side &&
-          !rook.hasMoved &&
-          !state.pieces[homeRow * cols + 5] &&
-          !state.pieces[kCastleTo] &&
-          isCellPlayable(state.board, homeRow * cols + 5) &&
-          isCellPlayable(state.board, kCastleTo) &&
-          isDirectionPermitted(0, 2, kCastleTo) &&
-          isEntryPermitted(kCastleTo)
-        ) {
-          if (
-            rules.noCheckRestriction ||
-            (!isSquareAttackedByEnemy(state, from, piece.side) &&
-              !isSquareAttackedByEnemy(state, homeRow * cols + 5, piece.side) &&
-              !isSquareAttackedByEnemy(state, kCastleTo, piece.side))
-          ) {
-            moves.push({ from, to: kCastleTo, isCastle: 'kingside' });
+      const isBackEdge = isFurthestForwardSquare(state.board, r0, c0, -fdr, -fdc);
+      if (fdc === 0 && cols >= 4 && (r0 === (fdr === -1 ? rows - 1 : 0) || isBackEdge)) {
+        for (const dir of [1, -1] as const) {
+          let cRook = c0 + dir;
+          let pathClear = true;
+          let foundRook: number | null = null;
+          while (cRook >= 0 && cRook < cols) {
+            const sq = r0 * cols + cRook;
+            const occupant = state.pieces[sq];
+            if (!isCellPlayable(state.board, sq)) {
+              pathClear = false;
+              break;
+            }
+            if (occupant) {
+              if (
+                occupant.side === piece.side &&
+                occupant.pieceId === 'builtin:R' &&
+                !occupant.hasMoved
+              ) {
+                foundRook = cRook;
+              }
+              break;
+            }
+            cRook += dir;
+          }
+          if (pathClear && foundRook !== null && Math.abs(foundRook - c0) >= 2) {
+            const dist = Math.abs(foundRook - c0);
+            const kingStep = dist >= 3 ? 2 : 1;
+            const kingToCol = c0 + dir * kingStep;
+            const rookToCol = kingToCol - dir;
+            const kingToSq = r0 * cols + kingToCol;
+            const rookToSq = r0 * cols + rookToCol;
+            const rookSq = r0 * cols + foundRook;
+            const passOk = (() => {
+              if (rules.noCheckRestriction) return true;
+              for (let step = 0; step <= kingStep; step++) {
+                if (isSquareAttackedByEnemy(state, r0 * cols + (c0 + dir * step), piece.side)) {
+                  return false;
+                }
+              }
+              return true;
+            })();
+            if (
+              passOk &&
+              isDirectionPermitted(0, kingToCol - c0, kingToSq) &&
+              isEntryPermitted(kingToSq)
+            ) {
+              moves.push({
+                from,
+                to: kingToSq,
+                isCastle: dir > 0 ? 'kingside' : 'queenside',
+                castleRookFrom: rookSq,
+                castleRookTo: rookToSq,
+              });
+            }
           }
         }
-        // Queenside
-        const qIdx = homeRow * cols;
-        const qRook = state.pieces[qIdx];
-        const qCastleTo = homeRow * cols + 2;
-        if (
-          qRook &&
-          qRook.side === piece.side &&
-          !qRook.hasMoved &&
-          !state.pieces[homeRow * cols + 1] &&
-          !state.pieces[qCastleTo] &&
-          !state.pieces[homeRow * cols + 3] &&
-          isCellPlayable(state.board, qCastleTo) &&
-          isCellPlayable(state.board, homeRow * cols + 3) &&
-          isDirectionPermitted(0, -2, qCastleTo) &&
-          isEntryPermitted(qCastleTo)
-        ) {
-          if (
-            rules.noCheckRestriction ||
-            (!isSquareAttackedByEnemy(state, from, piece.side) &&
-              !isSquareAttackedByEnemy(state, homeRow * cols + 3, piece.side) &&
-              !isSquareAttackedByEnemy(state, qCastleTo, piece.side))
-          ) {
-            moves.push({ from, to: qCastleTo, isCastle: 'queenside' });
+      } else if (fdr === 0 && rows >= 4 && (c0 === (fdc === 1 ? 0 : cols - 1) || isBackEdge)) {
+        for (const dir of [1, -1] as const) {
+          let rRook = r0 + dir;
+          let pathClear = true;
+          let foundRook: number | null = null;
+          while (rRook >= 0 && rRook < rows) {
+            const sq = rRook * cols + c0;
+            const occupant = state.pieces[sq];
+            if (!isCellPlayable(state.board, sq)) {
+              pathClear = false;
+              break;
+            }
+            if (occupant) {
+              if (
+                occupant.side === piece.side &&
+                occupant.pieceId === 'builtin:R' &&
+                !occupant.hasMoved
+              ) {
+                foundRook = rRook;
+              }
+              break;
+            }
+            rRook += dir;
+          }
+          if (pathClear && foundRook !== null && Math.abs(foundRook - r0) >= 2) {
+            const dist = Math.abs(foundRook - r0);
+            const kingStep = dist >= 3 ? 2 : 1;
+            const kingToRow = r0 + dir * kingStep;
+            const rookToRow = kingToRow - dir;
+            const kingToSq = kingToRow * cols + c0;
+            const rookToSq = rookToRow * cols + c0;
+            const rookSq = foundRook * cols + c0;
+            const passOk = (() => {
+              if (rules.noCheckRestriction) return true;
+              for (let step = 0; step <= kingStep; step++) {
+                if (isSquareAttackedByEnemy(state, (r0 + dir * step) * cols + c0, piece.side)) {
+                  return false;
+                }
+              }
+              return true;
+            })();
+            if (
+              passOk &&
+              isDirectionPermitted(kingToRow - r0, 0, kingToSq) &&
+              isEntryPermitted(kingToSq)
+            ) {
+              moves.push({
+                from,
+                to: kingToSq,
+                isCastle: dir > 0 ? 'kingside' : 'queenside',
+                castleRookFrom: rookSq,
+                castleRookTo: rookToSq,
+              });
+            }
           }
         }
       }
@@ -1165,6 +1489,16 @@ function getPseudoMovesForPiece(
             }
           }
         }
+      }
+    }
+    for (const evo of rules.pieceEvolutionOnCaptures || []) {
+      if (
+        evo.grantPieceId &&
+        (piece.capturesMade || 0) >= evo.threshold &&
+        doesPieceMatchFilter(piece.pieceId, evo.filter, piece.side) &&
+        evo.grantPieceId !== piece.pieceId
+      ) {
+        emitTemplateMoves(evo.grantPieceId, false);
       }
     }
   }
@@ -1407,6 +1741,99 @@ export function getLegalMovesForSquare(
   return anyCaptureExists ? legal.filter((m) => m.captureIndex !== undefined) : legal;
 }
 
+export function getLegalDropMovesForSide(
+  state: GameState,
+  side: PlayerSide,
+  pieceIdFilter?: string
+): LegalMove[] {
+  if (state.winner) return [];
+  if (getCurrentTurnSide(state) !== side) return [];
+  const rules = getStateRules(state);
+  if (!rules.allowPieceDrops) return [];
+
+  const reserve = state.capturedReserve?.[side] || [];
+  if (reserve.length === 0) return [];
+
+  const uniquePieceIds = pieceIdFilter
+    ? reserve.includes(pieceIdFilter)
+      ? [pieceIdFilter]
+      : []
+    : Array.from(new Set(reserve));
+  if (uniquePieceIds.length === 0) return [];
+
+  const { rows, cols } = state.board;
+  const [fdr, fdc] = getForwardDirection(state, side);
+  const hasKing = findKingSquare(state, side) !== null;
+  const enforceKingSafety =
+    !rules.noCheckRestriction &&
+    hasKing &&
+    (!state.variant.victoryType ||
+      state.variant.victoryType === 'checkmate_or_king' ||
+      state.variant.victoryType === 'king_of_hill');
+
+  const dropMoves: LegalMove[] = [];
+  for (const dropPid of uniquePieceIds) {
+    const isPawnLike = isPawnLikeForOrientation(dropPid, state.customPieceMap);
+    for (let sq = 0; sq < rows * cols; sq++) {
+      if (!isCellPlayable(state.board, sq) || state.pieces[sq]) continue;
+      if (!isSpecialEntryAllowed(rules, state.board, dropPid, sq, side)) continue;
+      if (!isSquareColorAllowed(rules, dropPid, sq, cols, side)) continue;
+      if (isPawnLike) {
+        const r = Math.floor(sq / cols);
+        const c = sq % cols;
+        if (isFurthestForwardSquare(state.board, r, c, fdr, fdc)) continue;
+      }
+      const candidate: LegalMove = {
+        from: -1,
+        to: sq,
+        isDrop: true,
+        dropPieceId: dropPid,
+      };
+      if (enforceKingSafety) {
+        const sim = applyMoveRaw(state, candidate);
+        const kSq = findKingSquare(sim, side);
+        if (kSq !== null && isSquareAttackedByEnemy(sim, kSq, side)) {
+          continue;
+        }
+      }
+      dropMoves.push(candidate);
+    }
+  }
+  return dropMoves;
+}
+
+export function getPremoveCandidateTargets(
+  state: GameState,
+  from: number,
+  side: PlayerSide
+): number[] {
+  const piece = state.pieces[from];
+  if (!piece || piece.side !== side || state.winner) return [];
+  // Probe on a board with only blocked/disabled squares blocking sliders so recaptures/pre-advances are selectable
+  const probe = cloneGameState(state);
+  probe.pieces = { [from]: { ...piece, frozenTurns: 0 } };
+  const moves = getPseudoMovesForPiece(probe, from, false, true, false);
+  const targets = new Set<number>(moves.map((m) => m.to));
+  // For standard pawns, also include diagonal pre-captures since probe cleared enemy pieces
+  if (piece.pieceId === 'builtin:P' || state.customPieceMap[piece.pieceId]?.moves?.pawn) {
+    const { rows, cols } = state.board;
+    const r0 = Math.floor(from / cols);
+    const c0 = from % cols;
+    const [fdr, fdc] = getForwardDirection(state, side);
+    const diags: [number, number][] =
+      fdr !== 0 ? [[fdr, -1], [fdr, 1]] : [[-1, fdc], [1, fdc]];
+    for (const [dr, dc] of diags) {
+      const nr = r0 + dr;
+      const nc = c0 + dc;
+      if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+        const to = nr * cols + nc;
+        if (isCellPlayable(state.board, to)) targets.add(to);
+      }
+    }
+  }
+  return Array.from(targets);
+}
+
 export function getAllLegalMovesForSide(
   state: GameState,
   side: PlayerSide,
@@ -1420,6 +1847,9 @@ export function getAllLegalMovesForSide(
     }
   }
   const rules = getStateRules(state);
+  if (rules.allowPieceDrops) {
+    all.push(...getLegalDropMovesForSide(state, side));
+  }
   if (rules.mandatoryCapture && all.some((m) => m.captureIndex !== undefined)) {
     return all.filter((m) => m.captureIndex !== undefined);
   }
@@ -1459,7 +1889,7 @@ export function explainBlockedMove(
   const c0 = from % cols;
   const r1 = Math.floor(to / cols);
   const c1 = to % cols;
-  const [fdr, fdc] = getForwardDirection(piece.side);
+  const [fdr, fdc] = getForwardDirection(state, piece.side);
   const dot = (r1 - r0) * fdr + (c1 - c0) * fdc;
 
   const dr = r1 - r0;
@@ -1569,7 +1999,7 @@ export function explainBlockedMove(
   }
   if (
     piece.pieceId === 'builtin:P' &&
-    Math.abs(r1 - r0) === 2 &&
+    (Math.abs(r1 - r0) === 2 || Math.abs(c1 - c0) === 2) &&
     rules.disablePawnDoubleStep
   ) {
     return 'Règle de la variante : les pions ne peuvent avancer que d’une case.';
@@ -1583,6 +2013,52 @@ export function explainBlockedMove(
 
 function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
   const state = cloneGameState(prevState);
+  const rules = getStateRules(state);
+
+  // Handle parachutage / piece drops
+  if (move.isDrop && move.dropPieceId) {
+    const currentSide = getCurrentTurnSide(state);
+    const reserve = state.capturedReserve?.[currentSide] || [];
+    const idxInRes = reserve.indexOf(move.dropPieceId);
+    if (idxInRes >= 0) {
+      reserve.splice(idxInRes, 1);
+    }
+    state.enPassantTarget = null;
+    state.enPassantVictim = null;
+
+    const def = state.customPieceMap[move.dropPieceId];
+    const dropped: BoardPieceInstance = {
+      uid: `drop_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      pieceId: move.dropPieceId,
+      side: currentSide,
+      hasMoved: true,
+      shielded: false,
+      invisibleTurns: 0,
+      frozenTurns: 0,
+      powerUsesLeft: def ? (def.limits > 0 ? def.limits : def.powerType !== 'none' ? 3 : 0) : 0,
+      capturesMade: 0,
+    };
+
+    let finalDropIdx = move.to;
+    if (state.board.special?.includes(move.to)) {
+      const eff = resolveDynamicSpecialEffect(rules, state.fullMoveNumber);
+      if (eff === 'teleport' && state.board.special.length > 1) {
+        const others = state.board.special.filter((sq) => sq !== move.to && !state.pieces[sq]);
+        if (others.length > 0) finalDropIdx = others[0];
+      } else if (eff === 'promote' && !isKingPiece(dropped.pieceId, state.customPieceMap)) {
+        dropped.pieceId = rules.specialPromoteTarget || 'builtin:Q';
+      } else if (eff === 'shield') {
+        dropped.shielded = true;
+      } else if (eff === 'freeze') {
+        dropped.frozenTurns = 2;
+      } else if (eff === 'trap' && !isKingPiece(dropped.pieceId, state.customPieceMap)) {
+        return state;
+      }
+    }
+    state.pieces[finalDropIdx] = dropped;
+    return state;
+  }
+
   const moving = state.pieces[move.from];
   if (!moving) return state;
 
@@ -1615,8 +2091,6 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
     return state;
   }
 
-  const rules = getStateRules(state);
-
   // Handle Shield absorption on capture
   const victimIdx = move.captureIndex ?? move.to;
   const victim = state.pieces[victimIdx];
@@ -1638,22 +2112,31 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
   state.enPassantVictim = null;
 
   if (moving.pieceId === 'builtin:P') {
-    const r0 = Math.floor(move.from / state.board.cols);
-    const r1 = Math.floor(move.to / state.board.cols);
-    if (Math.abs(r1 - r0) === 2) {
+    const cols = state.board.cols;
+    const r0 = Math.floor(move.from / cols);
+    const c0 = move.from % cols;
+    const r1 = Math.floor(move.to / cols);
+    const c1 = move.to % cols;
+    if (Math.abs(r1 - r0) === 2 && c0 === c1) {
       const midR = (r0 + r1) / 2;
-      const c0 = move.from % state.board.cols;
-      state.enPassantTarget = midR * state.board.cols + c0;
+      state.enPassantTarget = midR * cols + c0;
+      state.enPassantVictim = move.to;
+    } else if (Math.abs(c1 - c0) === 2 && r0 === r1) {
+      const midC = (c0 + c1) / 2;
+      state.enPassantTarget = r0 * cols + midC;
       state.enPassantVictim = move.to;
     }
   }
 
   let capturedSuccessful = false;
+  let capturedPieceIdForReserve: string | null = null;
   if (move.isEnPassant && prevEpVictim !== null && state.pieces[prevEpVictim]) {
+    capturedPieceIdForReserve = state.pieces[prevEpVictim].pieceId;
     delete state.pieces[prevEpVictim];
     state.capturesCount[moving.side] += 1;
     capturedSuccessful = true;
   } else if (victim && isCaptureTarget) {
+    capturedPieceIdForReserve = victim.pieceId;
     delete state.pieces[victimIdx];
     state.capturesCount[moving.side] += 1;
     capturedSuccessful = true;
@@ -1661,6 +2144,10 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
 
   delete state.pieces[move.from];
   moving.hasMoved = true;
+
+  if (capturedSuccessful) {
+    moving.capturesMade = (moving.capturesMade || 0) + 1;
+  }
 
   if (capturedSuccessful && (rules.kamikazeOnCapture || rules.atomicCapture)) {
     if (rules.atomicCapture) {
@@ -1682,6 +2169,15 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
     return state;
   }
 
+  if (
+    capturedSuccessful &&
+    rules.allowPieceDrops &&
+    capturedPieceIdForReserve &&
+    !isKingPiece(capturedPieceIdForReserve, state.customPieceMap)
+  ) {
+    state.capturedReserve[moving.side].push(capturedPieceIdForReserve);
+  }
+
   if (move.promotionPieceId) {
     moving.pieceId = move.promotionPieceId;
   } else if (
@@ -1690,33 +2186,50 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
     !isKingPiece(moving.pieceId, state.customPieceMap)
   ) {
     moving.pieceId = rules.promoteOnCaptureTarget || 'builtin:Q';
+  } else if (capturedSuccessful && (rules.pieceEvolutionOnCaptures || []).length > 0) {
+    const evo = rules.pieceEvolutionOnCaptures.find(
+      (e) =>
+        e.becomePieceId &&
+        (moving.capturesMade || 0) >= e.threshold &&
+        doesPieceMatchFilter(moving.pieceId, e.filter, moving.side)
+    );
+    if (evo?.becomePieceId && !isKingPiece(moving.pieceId, state.customPieceMap)) {
+      moving.pieceId = evo.becomePieceId;
+    }
   }
 
-  // Castling rook move
+  // Castling rook move (supports flexible rook positions + vertical castling + legacy 8x8 fallback)
   if (move.isCastle) {
-    const row = Math.floor(move.to / state.board.cols);
-    if (move.isCastle === 'kingside') {
-      const rFrom = row * state.board.cols + 7;
-      const rTo = row * state.board.cols + 5;
-      if (state.pieces[rFrom]) {
-        state.pieces[rTo] = { ...state.pieces[rFrom], hasMoved: true };
-        delete state.pieces[rFrom];
+    if (move.castleRookFrom !== undefined && move.castleRookTo !== undefined) {
+      if (state.pieces[move.castleRookFrom]) {
+        state.pieces[move.castleRookTo] = { ...state.pieces[move.castleRookFrom], hasMoved: true };
+        delete state.pieces[move.castleRookFrom];
       }
     } else {
-      const rFrom = row * state.board.cols;
-      const rTo = row * state.board.cols + 3;
-      if (state.pieces[rFrom]) {
-        state.pieces[rTo] = { ...state.pieces[rFrom], hasMoved: true };
-        delete state.pieces[rFrom];
+      const row = Math.floor(move.to / state.board.cols);
+      if (move.isCastle === 'kingside') {
+        const rFrom = row * state.board.cols + 7;
+        const rTo = row * state.board.cols + 5;
+        if (state.pieces[rFrom]) {
+          state.pieces[rTo] = { ...state.pieces[rFrom], hasMoved: true };
+          delete state.pieces[rFrom];
+        }
+      } else {
+        const rFrom = row * state.board.cols;
+        const rTo = row * state.board.cols + 3;
+        if (state.pieces[rFrom]) {
+          state.pieces[rTo] = { ...state.pieces[rFrom], hasMoved: true };
+          delete state.pieces[rFrom];
+        }
       }
     }
   }
 
   let finalIndex = move.to;
 
-  // Special square effects when landing (supports dropdown OR descriptive text)!
+  // Special square effects when landing (supports dropdown, descriptive text, or periodic rotation)!
   if (state.board.special?.includes(move.to)) {
-    const eff = rules.effectiveSpecialEffect;
+    const eff = resolveDynamicSpecialEffect(rules, state.fullMoveNumber);
     if (eff === 'teleport' && state.board.special.length > 1) {
       const others = state.board.special.filter((sq) => sq !== move.to && !state.pieces[sq]);
       if (others.length > 0) {
@@ -1741,12 +2254,14 @@ function applyMoveRaw(prevState: GameState, move: LegalMove): GameState {
 export function applyMove(prevState: GameState, move: LegalMove): GameState {
   if (prevState.winner) return prevState;
   const currentSide = getCurrentTurnSide(prevState);
-  const movingBefore = prevState.pieces[move.from];
-  if (!movingBefore || movingBefore.side !== currentSide) return prevState;
+  const isDropMove = Boolean(move.isDrop && move.dropPieceId);
+  const movingBefore = isDropMove ? null : prevState.pieces[move.from];
+  if (!isDropMove && (!movingBefore || movingBefore.side !== currentSide)) return prevState;
 
-  const isCaptureOrPawn =
-    Boolean(move.captureIndex !== undefined && prevState.pieces[move.captureIndex]) ||
-    movingBefore.pieceId === 'builtin:P';
+  const isCaptureOrPawn = isDropMove
+    ? move.dropPieceId === 'builtin:P'
+    : Boolean(move.captureIndex !== undefined && prevState.pieces[move.captureIndex]) ||
+      movingBefore?.pieceId === 'builtin:P';
 
   const state = applyMoveRaw(prevState, move);
   const rules = getStateRules(state);
@@ -1756,7 +2271,7 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
   if (
     !move.isPower &&
     state.board.special?.includes(move.to) &&
-    rules.effectiveSpecialEffect === 'double_action' &&
+    resolveDynamicSpecialEffect(rules, state.fullMoveNumber) === 'double_action' &&
     !state.bonusActionGrantedThisTurn
   ) {
     state.actionsRemaining += 1;
@@ -1770,6 +2285,7 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
     : false;
   if (
     !move.isPower &&
+    !isDropMove &&
     rules.extraActionOnCapture &&
     victimBefore &&
     !victimBefore.shielded &&
@@ -1780,19 +2296,28 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
   }
 
   // Record algebraic/readable notation
-  const fromCoord = squareToCoord(move.from, state.board.cols, state.board.rows);
   const toCoord = squareToCoord(move.to, state.board.cols, state.board.rows);
-  const sym = getPieceDisplaySymbol(movingBefore.pieceId, currentSide, state.customPieceMap);
-  const label = move.isPower
-    ? `${sym} ${fromCoord} (${move.description || move.isPower})`
-    : move.isCastle === 'kingside'
-      ? 'O-O'
-      : move.isCastle === 'queenside'
-        ? 'O-O-O'
-        : `${sym} ${fromCoord}${move.captureIndex !== undefined ? '×' : '→'}${toCoord}`;
+  const pieceIdForSym = isDropMove ? move.dropPieceId! : movingBefore!.pieceId;
+  const sym = getPieceDisplaySymbol(pieceIdForSym, currentSide, state.customPieceMap);
+  const label = isDropMove
+    ? `${sym}@${toCoord}`
+    : (() => {
+        const fromCoord = squareToCoord(move.from, state.board.cols, state.board.rows);
+        return move.isPower
+          ? `${sym} ${fromCoord} (${move.description || move.isPower})`
+          : move.isCastle === 'kingside'
+            ? 'O-O'
+            : move.isCastle === 'queenside'
+              ? 'O-O-O'
+              : `${sym} ${fromCoord}${move.captureIndex !== undefined ? '×' : '→'}${toCoord}${
+                  move.promotionPieceId
+                    ? `=${getPieceDisplaySymbol(move.promotionPieceId, currentSide, state.customPieceMap)}`
+                    : ''
+                }`;
+      })();
 
   state.moveHistory.push(label);
-  state.lastMove = { from: move.from, to: move.to, description: label };
+  state.lastMove = { from: isDropMove ? move.to : move.from, to: move.to, description: label };
 
   const setWinnerForSide = (winSide: PlayerSide, soloReason: string, teamReasonPrefix: string) => {
     const team = getTeamSides(rules, winSide).filter((m) => state.activeSides.includes(m));
@@ -1868,7 +2393,8 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
   // King of the Hill special victory
   if (
     state.variant.victoryType === 'king_of_hill' ||
-    (state.board.special?.length && rules.effectiveSpecialEffect === 'king_hill')
+    (state.board.special?.length &&
+      resolveDynamicSpecialEffect(rules, state.fullMoveNumber) === 'king_hill')
   ) {
     for (const sq of state.board.special || []) {
       const p = state.pieces[sq];
@@ -1906,12 +2432,8 @@ export function applyMove(prevState: GameState, move: LegalMove): GameState {
       const idx = Number(idxStr);
       const r = Math.floor(idx / cols);
       const c = idx % cols;
-      const [fdr, fdc] = getForwardDirection(p.side);
-      const reached =
-        (fdr === -1 && r === 0) ||
-        (fdr === 1 && r === rows - 1) ||
-        (fdc === 1 && c === cols - 1) ||
-        (fdc === -1 && c === 0);
+      const [fdr, fdc] = getForwardDirection(state, p.side);
+      const reached = isFurthestForwardSquare(state.board, r, c, fdr, fdc);
       if (reached) {
         setWinnerForSide(
           p.side,

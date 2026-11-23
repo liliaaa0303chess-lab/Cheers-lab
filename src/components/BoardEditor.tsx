@@ -13,6 +13,7 @@ import { ChessBoard } from './ChessBoard';
 interface BoardEditorProps {
   board: BoardConfig;
   settings: AppSettings;
+  canUseGoldNight?: boolean;
   onChange: (next: BoardConfig) => void;
   onSaveBoardToLibrary: (board: BoardConfig, name: string) => void;
   onNotify: (msg: string) => void;
@@ -34,6 +35,7 @@ const SPECIAL_EFFECT_OPTIONS: { value: SpecialCellEffectType; label: string }[] 
 export const BoardEditor: React.FC<BoardEditorProps> = ({
   board,
   settings,
+  canUseGoldNight = false,
   onChange,
   onSaveBoardToLibrary,
   onNotify,
@@ -43,6 +45,9 @@ export const BoardEditor: React.FC<BoardEditorProps> = ({
   const [rowsInput, setRowsInput] = useState(board.rows);
   const [colsInput, setColsInput] = useState(board.cols);
   const [boardNameInput, setBoardNameInput] = useState('');
+  const [boardVisibilityInput, setBoardVisibilityInput] = useState<'private' | 'public'>(
+    board.visibility === 'public' ? 'public' : 'private'
+  );
   const [showSaveName, setShowSaveName] = useState(false);
 
   const commitChange = (next: BoardConfig) => {
@@ -269,6 +274,9 @@ export const BoardEditor: React.FC<BoardEditorProps> = ({
             <option value="marble">Marbre</option>
             <option value="metal">Métal</option>
             <option value="night">Nuit</option>
+            {(canUseGoldNight || board.texture === 'gold_night') && (
+              <option value="gold_night">Nuit d’Or</option>
+            )}
           </select>
         </label>
 
@@ -362,11 +370,24 @@ export const BoardEditor: React.FC<BoardEditorProps> = ({
             placeholder="Nom du plateau (ex. Croix Celtique)"
             className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#151c27] px-3 py-2 text-sm"
           />
+          <select
+            value={boardVisibilityInput}
+            onChange={(e) =>
+              setBoardVisibilityInput(e.target.value === 'public' ? 'public' : 'private')
+            }
+            aria-label="Visibilité du plateau"
+            className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-[#151c27] px-3 py-2 text-sm"
+          >
+            <option value="private">Privé</option>
+            <option value="public">Public</option>
+          </select>
           <button
             type="button"
             onClick={() => {
               const name = boardNameInput.trim() || `Plateau ${board.rows}×${board.cols}`;
-              onSaveBoardToLibrary(cloneBoardConfig(board), name);
+              const copy = cloneBoardConfig(board);
+              copy.visibility = boardVisibilityInput;
+              onSaveBoardToLibrary(copy, name);
               setBoardNameInput('');
               setShowSaveName(false);
             }}

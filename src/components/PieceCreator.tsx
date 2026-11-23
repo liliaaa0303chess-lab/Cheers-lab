@@ -17,11 +17,13 @@ import type {
   Variant,
 } from '../types/chess';
 import { ChessBoard } from './ChessBoard';
+import { ChessPieceArtwork } from './ChessPieceArtwork';
 import { validateFamilyFriendlyText } from '../utils/moderation';
 import { safeUuid } from '../utils/safeId';
 
 interface PieceCreatorProps {
   pieces: PieceDef[];
+  publicVariantPieceIds?: string[];
   currentVariantBoard?: BoardConfig;
   currentVariant?: Variant;
   settings: AppSettings;
@@ -33,9 +35,27 @@ interface PieceCreatorProps {
 
 const SYMBOLS = [
   '★', '⚡', '✦', '⬟', '☄', '☯', '●', '◆',
-  '♖', '♗', '♘', '♕', '♔', '♙',
-  '♜', '♝', '♞', '♛', '♚', '♟',
+  '♔', '♕', '♖', '♗', '♘', '♙', '🦄',
 ];
+
+function canonicalSymbolKey(sym: string): string {
+  switch (sym) {
+    case '♚':
+      return '♔';
+    case '♛':
+      return '♕';
+    case '♜':
+      return '♖';
+    case '♝':
+      return '♗';
+    case '♞':
+      return '♘';
+    case '♟':
+      return '♙';
+    default:
+      return sym;
+  }
+}
 
 const POWER_OPTIONS: { value: SpecialPowerType; label: string }[] = [
   { value: 'none', label: 'Aucun pouvoir spécial' },
@@ -68,6 +88,7 @@ const EMPTY_FORM = (): PieceDef => ({
   id: '',
   name: '',
   symbol: '★',
+  visibility: 'private',
   moves: {
     rook: false,
     bishop: false,
@@ -93,6 +114,7 @@ const EMPTY_FORM = (): PieceDef => ({
 
 export const PieceCreator: React.FC<PieceCreatorProps> = ({
   pieces,
+  publicVariantPieceIds = [],
   currentVariantBoard,
   currentVariant,
   settings,
@@ -196,10 +218,12 @@ export const PieceCreator: React.FC<PieceCreatorProps> = ({
       onNotify(failed.reason || 'Texte refusé (charte tout public).');
       return;
     }
+    const isLockedPublic = Boolean(form.id && publicVariantPieceIds.includes(form.id));
     const saved: PieceDef = {
       ...form,
       id: form.id || `piece_${safeUuid().slice(0, 8)}`,
       name: form.name.trim(),
+      visibility: isLockedPublic ? 'public' : form.visibility === 'public' ? 'public' : 'private',
     };
     onSavePiece(saved);
     setTestingPieceId(saved.id);
@@ -320,8 +344,8 @@ export const PieceCreator: React.FC<PieceCreatorProps> = ({
             )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <label className="sm:col-span-2 block space-y-1">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <label className="sm:col-span-3 block space-y-1">
               <span className="text-xs text-slate-500 dark:text-slate-400">Nom de la pièce</span>
               <input
                 type="text"
@@ -332,20 +356,65 @@ export const PieceCreator: React.FC<PieceCreatorProps> = ({
               />
             </label>
             <label className="block space-y-1">
-              <span className="text-xs text-slate-500 dark:text-slate-400">Symbole</span>
+              <span className="text-xs text-slate-500 dark:text-slate-400">Visibilité</span>
               <select
-                value={form.symbol}
-                onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-lg"
+                value={
+                  form.id && publicVariantPieceIds.includes(form.id)
+                    ? 'public'
+                    : form.visibility || 'private'
+                }
+                disabled={Boolean(form.id && publicVariantPieceIds.includes(form.id))}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    visibility: e.target.value === 'public' ? 'public' : 'private',
+                  })
+                }
+                className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm disabled:opacity-60"
               >
-                {SYMBOLS.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
+                <option value="private">Privée</option>
+                <option value="public">Publique</option>
               </select>
             </label>
           </div>
+          <div className="space-y-1.5">
+            <span className="text-xs text-slate-500 dark:text-slate-400 block">
+              Symbole visuel de la pièce
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {SYMBOLS.map((s) => {
+                const active = canonicalSymbolKey(form.symbol) === s;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setForm({ ...form, symbol: s })}
+                    aria-label={`Choisir le symbole ${s}`}
+                    className={`w-11 h-11 rounded-xl border flex items-center justify-center p-1.5 transition-transform active:scale-95 ${
+                      active
+                        ? 'border-sky-500 bg-sky-500/20 ring-2 ring-sky-400/40'
+                        : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] hover:border-slate-400'
+                    }`}
+                  >
+                    <ChessPieceArtwork
+                      symbol={s}
+                      side="white"
+                      texture={form.texture}
+                      lightColor={form.light}
+                      darkColor={form.dark}
+                      mode="board"
+                      className="w-7 h-7"
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {form.id && publicVariantPieceIds.includes(form.id) && (
+            <p className="text-[11px] text-sky-400">
+              Cette pièce est utilisée dans une variante publique : elle reste automatiquement publique.
+            </p>
+          )}
 
           {/* Méthode 1 : Combinaison de déplacements */}
           <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-slate-800">
@@ -796,8 +865,33 @@ export const PieceCreator: React.FC<PieceCreatorProps> = ({
                   <div key={p.id} className="py-3 flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="font-medium text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                        <span className="text-xl">{p.symbol}</span>
+                        <span
+                          className="w-8 h-8 rounded-lg p-1 flex items-center justify-center shrink-0 border border-white/10"
+                          style={{ backgroundColor: p.dark || '#151c27' }}
+                        >
+                          <ChessPieceArtwork
+                            pieceId={p.id}
+                            symbol={p.symbol}
+                            side="white"
+                            texture={p.texture}
+                            lightColor={p.light}
+                            darkColor={p.dark}
+                            mode="board"
+                            className="w-6 h-6"
+                          />
+                        </span>
                         <span className="truncate">{p.name}</span>
+                        <span
+                          className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${
+                            p.visibility === 'public' || publicVariantPieceIds.includes(p.id)
+                              ? 'border-emerald-500/35 bg-emerald-500/10 text-emerald-400'
+                              : 'border-slate-600/40 bg-slate-500/10 text-slate-400'
+                          }`}
+                        >
+                          {p.visibility === 'public' || publicVariantPieceIds.includes(p.id)
+                            ? 'Publique'
+                            : 'Privée'}
+                        </span>
                       </div>
                       <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
                         {[

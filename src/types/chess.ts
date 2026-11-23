@@ -1,8 +1,10 @@
 export type PlayerSide = 'white' | 'black' | 'red' | 'blue' | 'green' | 'gold';
 
-export type BoardTexture = 'plain' | 'wood' | 'stone' | 'marble' | 'metal' | 'night';
+export type BoardTexture = 'plain' | 'wood' | 'stone' | 'marble' | 'metal' | 'night' | 'gold_night';
 export type PieceTexture = 'plain' | 'wood' | 'stone' | 'marble' | 'metal';
 export type VariantVisibility = 'private' | 'public' | 'link';
+export type AssetVisibility = 'private' | 'public';
+export type BattleCardStyle = 'classic' | 'emerald' | 'crimson' | 'imperial' | 'cosmic';
 export type VariantDifficulty = 'Très simple' | 'Simple' | 'Moyenne' | 'Complexe' | 'Extrême';
 
 export type SpecialCellEffectType =
@@ -35,6 +37,7 @@ export type VictoryConditionType =
 export interface BoardConfig {
   id?: string;
   name?: string;
+  visibility?: AssetVisibility;
   rows: number;
   cols: number;
   cells: number[]; // 1 = active, 0 = removed
@@ -64,6 +67,7 @@ export interface PieceDef {
   id: string;
   name: string;
   symbol: string;
+  visibility?: AssetVisibility;
   moves: PieceMovesConfig;
   customMoves: string;
   powerType: SpecialPowerType;
@@ -122,6 +126,7 @@ export interface VariantRuleConfig {
   captureRestrictions?: VariantCaptureRestriction[];
   teamAssignments?: Partial<Record<PlayerSide, number>>;
   teamSharedElimination?: boolean;
+  allowPieceDrops?: boolean;
 }
 
 export interface VariantVersion {
@@ -175,6 +180,76 @@ export interface Variant {
   versions?: VariantVersion[];
 }
 
+export interface BattleCardData {
+  uid?: string;
+  nickname: string;
+  avatarColor: string;
+  avatarSymbol: string;
+  eol: number;
+  title?: string;
+  streakPieceSymbol?: string;
+  streakPieceLabel?: string;
+  battleCardStyle?: BattleCardStyle;
+  isOnline?: boolean;
+}
+
+export interface FriendEntry {
+  uid: string;
+  nickname: string;
+  avatarColor: string;
+  avatarSymbol: string;
+  eol: number;
+  title?: string;
+  streakPieceSymbol?: string;
+  streakPieceLabel?: string;
+  battleCardStyle?: BattleCardStyle;
+  isOnline?: boolean;
+  addedAt: string;
+}
+
+export interface FriendRequestEntry {
+  id: string;
+  fromUid: string;
+  fromNickname: string;
+  fromAvatarColor: string;
+  fromAvatarSymbol: string;
+  fromEol: number;
+  fromTitle?: string;
+  fromStreakPieceSymbol?: string;
+  fromBattleCardStyle?: BattleCardStyle;
+  toUid: string;
+  status: 'pending' | 'accepted';
+  createdAt: string;
+}
+
+export interface GameInviteEntry {
+  id: string;
+  fromUid: string;
+  fromNickname: string;
+  fromAvatarColor: string;
+  fromAvatarSymbol: string;
+  fromEol: number;
+  toUid: string;
+  variantId?: string;
+  variantName: string;
+  roomCode?: string;
+  roomId?: string;
+  createdAt: string;
+}
+
+export interface PublicPlayerProfile extends BattleCardData {
+  uid: string;
+  gamesPlayed: number;
+  wins: number;
+  loginStreak: number;
+  bestLoginStreak: number;
+  goldCoins: number;
+  unlockedTitles: string[];
+  publicVariants: Variant[];
+  publicPieces: PieceDef[];
+  publicBoards: BoardConfig[];
+}
+
 export interface Profile {
   id: string;
   nickname: string;
@@ -190,6 +265,16 @@ export interface Profile {
   loginStreak?: number;
   bestLoginStreak?: number;
   lastStreakDate?: string;
+  goldCoins?: number;
+  goldEffectIds?: string[];
+  gold100Choice?: 'board_piece' | 'signature_mate' | null;
+  gold1000Choice?: string;
+  customGoldTitle?: string;
+  equippedTitle?: string;
+  equippedStreakPiece?: string;
+  battleCardStyle?: BattleCardStyle;
+  showBattleIntro?: boolean;
+  friends?: FriendEntry[];
   botChallenges?: Record<string, number[]>;
   botRebellionUnlocked?: boolean;
   createdAt: string;
@@ -224,7 +309,11 @@ export interface ReplayMove {
   captureIndex?: number;
   promotionPieceId?: string;
   isCastle?: 'kingside' | 'queenside';
+  castleRookFrom?: number;
+  castleRookTo?: number;
   isEnPassant?: boolean;
+  isDrop?: boolean;
+  dropPieceId?: string;
   isPower?: SpecialPowerType;
   powerTarget?: number;
   description?: string;
@@ -240,7 +329,13 @@ export interface GameRecord {
   variantSnapshot?: Variant;
   creatorName?: string;
   opponentName: string;
+  opponentUid?: string;
   opponentEol?: number;
+  opponentAvatarColor?: string;
+  opponentAvatarSymbol?: string;
+  opponentTitle?: string;
+  opponentStreakPiece?: string;
+  opponentBattleCardStyle?: BattleCardStyle;
   aiLevel?: AiDifficultyLevel;
   playerSide?: PlayerSide;
   result: 'win' | 'loss' | 'draw' | 'saved';
@@ -359,6 +454,12 @@ export interface OnlineHumanSeat {
   nickname: string;
   eol: number;
   side: PlayerSide;
+  avatarColor?: string;
+  avatarSymbol?: string;
+  title?: string;
+  streakPieceSymbol?: string;
+  streakPieceLabel?: string;
+  battleCardStyle?: BattleCardStyle;
   theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
 }
 

@@ -7,11 +7,14 @@ import {
   ChevronDown,
   Cloud,
   CloudOff,
+  Coins,
   Info,
   Palette,
   RefreshCw,
+  Shield,
   ShieldCheck,
   Smartphone,
+  Swords,
   Trash2,
   Trophy,
   User as UserIcon,
@@ -22,6 +25,7 @@ import { getPlayerLevel } from '../engine/eol';
 import type { User } from '../firebase';
 import type {
   AppSettings,
+  BattleCardStyle,
   BoardTexture,
   PieceTexture,
   Profile,
@@ -36,9 +40,22 @@ import {
   getStoredPublicAppUrlOverride,
   setStoredPublicAppUrlOverride,
 } from '../utils/appUrl';
+import {
+  BATTLE_CARD_STYLES,
+  getUnlockedGoldEffects,
+  getUnlockedTitlesForProfile,
+  GOLD_100_OPTIONS,
+  GOLD_1000_TITLES,
+  GOLD_EFFECT_MILESTONES,
+  isGoldEffectActive,
+  resolveEquippedTitle,
+} from '../utils/goldRewards';
 import { validateFamilyFriendlyText } from '../utils/moderation';
 import { safeUuid } from '../utils/safeId';
 import { playChessSound } from '../utils/sound';
+import { getUnlockedRankSymbols } from '../utils/streaks';
+import { BattleCard, getBattleCardFromProfile } from './BattleCard';
+import { ChessPieceArtwork } from './ChessPieceArtwork';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface SettingsViewProps {
@@ -55,6 +72,7 @@ interface SettingsViewProps {
   onSaveTheme: (theme: SavedTheme) => void;
   onResetAllData: () => void;
   onOpenTutorial: () => void;
+  onTestBattleIntro?: () => void;
   onNotify: (msg: string) => void;
 }
 
@@ -67,6 +85,7 @@ const BOARD_TEXTURE_LABELS: Record<BoardTexture, string> = {
   marble: 'Marbre',
   metal: 'Métal',
   night: 'Nuit',
+  gold_night: 'Nuit d’Or',
 };
 
 const PIECE_TEXTURE_LABELS: Record<PieceTexture, string> = {
@@ -80,6 +99,8 @@ const PIECE_TEXTURE_LABELS: Record<PieceTexture, string> = {
 type SettingsSectionId =
   | 'theme'
   | 'profile'
+  | 'battle_card'
+  | 'gold_coins'
   | 'sound'
   | 'leaderboard'
   | 'tutorial'
@@ -100,9 +121,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onSaveTheme,
   onResetAllData,
   onOpenTutorial,
+  onTestBattleIntro,
   onNotify,
 }) => {
   const [nickname, setNickname] = useState(profile.nickname);
+  const [customTitleInput, setCustomTitleInput] = useState(profile.customGoldTitle || '');
   const [themeName, setThemeName] = useState('');
   const [confirmReset, setConfirmReset] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -111,6 +134,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [openSections, setOpenSections] = useState<Partial<Record<SettingsSectionId, boolean>>>({});
   const [shareUrlInput, setShareUrlInput] = useState<string>(() => getPublicAppUrl());
   const [editingShareUrl, setEditingShareUrl] = useState(false);
+
+  const goldCoins = Math.max(0, Math.trunc(profile.goldCoins || 0));
+  const unlockedEffects = getUnlockedGoldEffects(goldCoins);
+  const unlockedTitles = getUnlockedTitlesForProfile(profile);
+  const unlockedStreakRanks = getUnlockedRankSymbols(
+    Math.max(1, profile.bestLoginStreak || profile.loginStreak || 1)
+  );
+  const canUseGoldNight = goldCoins >= 100 && profile.gold100Choice === 'board_piece';
 
   const loadLeaderboard = useCallback(() => {
     fetchLeaderboardFromFirestore()
@@ -176,6 +207,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     marble: ['#f3f1ec', '#637085'],
     metal: ['#d3dfe8', '#546574'],
     night: ['#bcc6d8', '#253048'],
+    gold_night: ['#d8c49a', '#1d2232'],
   };
   const [sq1, sq2] = boardPreviewPalettes[settings.boardTexture] || boardPreviewPalettes.plain;
 
@@ -491,6 +523,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                       <option value="marble">Marbre</option>
                       <option value="metal">Métal</option>
                       <option value="night">Nuit</option>
+                      {(canUseGoldNight || settings.boardTexture === 'gold_night') && (
+                        <option value="gold_night">Nuit d’Or (100 Pièces d’or)</option>
+                      )}
                     </select>
                   </label>
 
@@ -567,13 +602,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                           className="flex items-center justify-center text-lg"
                         >
                           {i === 0 ? (
-                            <span className={`piece-glyph piece-side-white piece-tex-${settings.pieceTexture}`}>
-                              ♚
-                            </span>
+                            <ChessPieceArtwork
+                              pieceId="builtin:K"
+                              side="white"
+                              texture={settings.pieceTexture}
+                              lightColor={settings.pieceLight}
+                              darkColor={settings.pieceDark}
+                              mode="board"
+                              className="w-7 h-7"
+                            />
                           ) : i === 7 ? (
-                            <span className={`piece-glyph piece-side-black piece-tex-${settings.pieceTexture}`}>
-                              ♚
-                            </span>
+                            <ChessPieceArtwork
+                              pieceId="builtin:K"
+                              side="black"
+                              texture={settings.pieceTexture}
+                              lightColor={settings.pieceLight}
+                              darkColor={settings.pieceDark}
+                              mode="board"
+                              className="w-7 h-7"
+                            />
                           ) : null}
                         </div>
                       );
@@ -674,13 +721,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         key={sym}
                         type="button"
                         onClick={() => onUpdateProfile({ ...profile, avatarSymbol: sym })}
-                        className={`w-11 h-11 rounded-xl border text-xl flex items-center justify-center ${
+                        aria-label={`Choisir l’emblème ${sym}`}
+                        className={`w-11 h-11 rounded-xl border flex items-center justify-center p-1 transition-transform active:scale-95 ${
                           profile.avatarSymbol === sym
-                            ? 'border-sky-500 bg-sky-500/20'
-                            : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f]'
+                            ? 'border-sky-500 bg-sky-500/20 ring-2 ring-sky-400/40'
+                            : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] hover:border-slate-400'
                         }`}
                       >
-                        {sym}
+                        <span
+                          className="w-8 h-8 rounded-lg flex items-center justify-center p-1"
+                          style={{ backgroundColor: profile.avatarColor || '#7ebcff' }}
+                        >
+                          <ChessPieceArtwork
+                            symbol={sym}
+                            mode="emblem"
+                            bgColor={profile.avatarColor || '#7ebcff'}
+                            className="w-6 h-6"
+                          />
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -722,6 +780,374 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+        </section>
+
+        {/* Dépliant Carte de combat */}
+        <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] overflow-hidden">
+          <button
+            type="button"
+            onClick={() => toggleSection('battle_card')}
+            aria-expanded={Boolean(openSections.battle_card)}
+            className="w-full px-5 py-4 flex items-center justify-between gap-3 text-left hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition-colors"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center shrink-0">
+                <Swords className="w-4 h-4 text-amber-400" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                  Carte de combat
+                </div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
+                  Affiche VS avant chaque combat · Titre, pièce et style
+                </div>
+              </div>
+            </div>
+            <ChevronDown
+              className={`w-5 h-5 text-slate-400 shrink-0 transition-transform duration-200 ${
+                openSections.battle_card ? 'rotate-180 text-sky-400' : ''
+              }`}
+            />
+          </button>
+
+          {openSections.battle_card && (
+            <div className="px-5 pb-5 pt-4 border-t border-slate-200 dark:border-slate-800 space-y-4">
+              <div className="space-y-1.5">
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  Aperçu de votre carte de combat
+                </span>
+                <BattleCard card={getBattleCardFromProfile(profile, true)} showOnlineDot size="normal" />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block space-y-1">
+                  <span className="text-xs text-slate-500 dark:text-slate-400">Style de carte</span>
+                  <select
+                    value={profile.battleCardStyle || 'classic'}
+                    onChange={(e) =>
+                      onUpdateProfile({
+                        ...profile,
+                        battleCardStyle: e.target.value as BattleCardStyle,
+                      })
+                    }
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm"
+                  >
+                    {BATTLE_CARD_STYLES.map((st) => (
+                      <option key={st.id} value={st.id}>
+                        {st.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="block space-y-1">
+                  <span className="text-xs text-slate-500 dark:text-slate-400">
+                    Titre affiché sous votre pseudo
+                  </span>
+                  <select
+                    value={resolveEquippedTitle(profile) || ''}
+                    onChange={(e) =>
+                      onUpdateProfile({
+                        ...profile,
+                        equippedTitle: e.target.value || undefined,
+                      })
+                    }
+                    disabled={unlockedTitles.length === 0}
+                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm disabled:opacity-55"
+                  >
+                    {unlockedTitles.length === 0 ? (
+                      <option value="">Aucun titre débloqué pour l’instant</option>
+                    ) : (
+                      unlockedTitles.map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                </label>
+              </div>
+
+              <div className="space-y-1.5">
+                <span className="text-xs text-slate-500 dark:text-slate-400 block">
+                  Pièce de transformation affichée à droite de la carte
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  {unlockedStreakRanks.map((r) => {
+                    const active = (profile.equippedStreakPiece || unlockedStreakRanks[unlockedStreakRanks.length - 1]?.symbol) === r.symbol;
+                    return (
+                      <button
+                        key={r.minDays}
+                        type="button"
+                        onClick={() =>
+                          onUpdateProfile({ ...profile, equippedStreakPiece: r.symbol })
+                        }
+                        className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border text-xs font-semibold ${
+                          active
+                            ? 'border-amber-400 bg-amber-500/15 text-amber-300'
+                            : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] text-slate-300'
+                        }`}
+                      >
+                        <span className="w-5 h-5 shrink-0 inline-flex items-center justify-center">
+                          <ChessPieceArtwork symbol={r.symbol} side="gold" mode="board" className="w-5 h-5" />
+                        </span>
+                        <span>{r.title}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <label className="flex items-center gap-2 text-sm cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={profile.showBattleIntro !== false}
+                    onChange={(e) =>
+                      onUpdateProfile({ ...profile, showBattleIntro: e.target.checked })
+                    }
+                    className="accent-sky-500"
+                  />
+                  <span>Afficher l’affiche VS avant chaque combat</span>
+                </label>
+
+                {onTestBattleIntro && (
+                  <button
+                    type="button"
+                    onClick={onTestBattleIntro}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs min-h-[38px]"
+                  >
+                    <Swords className="w-3.5 h-3.5" />
+                    <span>Tester l’affiche VS</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* Dépliant Pièces d’or */}
+        <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] overflow-hidden">
+          <button
+            type="button"
+            onClick={() => toggleSection('gold_coins')}
+            aria-expanded={Boolean(openSections.gold_coins)}
+            className="w-full px-5 py-4 flex items-center justify-between gap-3 text-left hover:bg-slate-50/70 dark:hover:bg-slate-800/40 transition-colors"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-center justify-center shrink-0">
+                <Coins className="w-4 h-4 text-amber-400" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                  Pièces d’or
+                </div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 truncate font-mono-num">
+                  {goldCoins} Pièce{goldCoins > 1 ? 's' : ''} d’or · {unlockedEffects.length} effet
+                  {unlockedEffects.length > 1 ? 's' : ''} débloqué{unlockedEffects.length > 1 ? 's' : ''}
+                </div>
+              </div>
+            </div>
+            <ChevronDown
+              className={`w-5 h-5 text-slate-400 shrink-0 transition-transform duration-200 ${
+                openSections.gold_coins ? 'rotate-180 text-sky-400' : ''
+              }`}
+            />
+          </button>
+
+          {openSections.gold_coins && (
+            <div className="px-5 pb-5 pt-4 border-t border-slate-200 dark:border-slate-800 space-y-4">
+              <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs text-amber-200/80">Votre solde</div>
+                  <div className="text-xl font-black font-mono-num text-amber-300">
+                    🪙 {goldCoins} Pièce{goldCoins > 1 ? 's' : ''} d’or
+                  </div>
+                </div>
+                <span className="text-xs text-slate-300 text-right max-w-[200px]">
+                  Personnalisez ici les effets et récompenses débloqués.
+                </span>
+              </div>
+
+              {/* Effets débloqués tous les 10 (10 à 90) */}
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-slate-300">
+                  Effets visuels débloqués (tous les 10 jusqu’à 90)
+                </div>
+                {unlockedEffects.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    Aucun effet visuel débloqué pour l’instant.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {unlockedEffects.map((eff) => {
+                      const active = isGoldEffectActive(profile, eff.id);
+                      return (
+                        <label
+                          key={eff.id}
+                          className={`flex items-start gap-2.5 p-3 rounded-xl border text-xs cursor-pointer ${
+                            active
+                              ? 'border-amber-500/40 bg-amber-500/10'
+                              : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0f151f]'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={active}
+                            onChange={(e) => {
+                              const base = Array.isArray(profile.goldEffectIds)
+                                ? profile.goldEffectIds
+                                : GOLD_EFFECT_MILESTONES.filter(
+                                    (m) => goldCoins >= m.coinsRequired
+                                  ).map((m) => m.id);
+                              const nextIds = e.target.checked
+                                ? Array.from(new Set([...base, eff.id]))
+                                : base.filter((id) => id !== eff.id);
+                              onUpdateProfile({ ...profile, goldEffectIds: nextIds });
+                            }}
+                            className="accent-amber-400 mt-0.5"
+                          />
+                          <div>
+                            <div className="font-semibold text-slate-900 dark:text-slate-100">
+                              {eff.label}{' '}
+                              <span className="font-mono-num text-amber-400">
+                                ({eff.coinsRequired} 🪙)
+                              </span>
+                            </div>
+                            <div className="text-slate-500 dark:text-slate-400 mt-0.5">
+                              {eff.description}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Palier 100 : choix exclusif */}
+              {goldCoins >= 100 && (
+                <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                  <div className="text-xs font-semibold text-amber-300 flex items-center gap-1.5">
+                    <Shield className="w-3.5 h-3.5" />
+                    <span>Récompense spéciale des 100 Pièces d’or (au choix)</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {GOLD_100_OPTIONS.map((opt) => {
+                      const selected = profile.gold100Choice === opt.id;
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => {
+                            onUpdateProfile({ ...profile, gold100Choice: opt.id });
+                            onNotify(
+                              opt.id === 'board_piece'
+                                ? 'Plateau « Nuit d’Or » et pièce « L’Étincelle » activés !'
+                                : 'Animation « Échec & Mat Signature » activée !'
+                            );
+                          }}
+                          className={`p-3 rounded-xl border text-left space-y-1 transition-colors ${
+                            selected
+                              ? 'border-amber-400 bg-amber-500/15'
+                              : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0f151f] hover:border-amber-400/50'
+                          }`}
+                        >
+                          <div className="text-xs font-bold text-slate-900 dark:text-slate-100">
+                            {opt.title}
+                          </div>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                            {opt.description}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Palier 1000 : choix du premier titre */}
+              {goldCoins >= 1000 && (
+                <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                  <div className="text-xs font-semibold text-amber-300">
+                    Premier Titre (1 000 Pièces d’or) — Choisissez votre titre :
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {GOLD_1000_TITLES.map((t) => {
+                      const selected =
+                        (profile.gold1000Choice || GOLD_1000_TITLES[0]) === t;
+                      return (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() =>
+                            onUpdateProfile({
+                              ...profile,
+                              gold1000Choice: t,
+                              equippedTitle: t,
+                            })
+                          }
+                          className={`px-3 py-2 rounded-xl border text-xs font-semibold ${
+                            selected
+                              ? 'border-amber-400 bg-amber-500/15 text-amber-300'
+                              : 'border-slate-700 bg-[#0f151f] text-slate-300'
+                          }`}
+                        >
+                          ✦ {t}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Palier 5000 : titre personnalisé */}
+              {goldCoins >= 5000 && (
+                <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                  <div className="text-xs font-semibold text-amber-300">
+                    Titre sur mesure (5 000 Pièces d’or)
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={customTitleInput}
+                      maxLength={40}
+                      onChange={(e) => setCustomTitleInput(e.target.value)}
+                      placeholder="Votre titre personnalisé..."
+                      className="flex-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f] px-3 py-2 text-sm"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const clean = customTitleInput.trim();
+                        if (!clean) {
+                          onNotify('Entrez un titre.');
+                          return;
+                        }
+                        const mod = validateFamilyFriendlyText(clean, {
+                          blockLinks: true,
+                          label: 'Le titre',
+                        });
+                        if (!mod.ok) {
+                          onNotify(mod.reason || 'Titre refusé.');
+                          return;
+                        }
+                        onUpdateProfile({
+                          ...profile,
+                          customGoldTitle: clean,
+                          equippedTitle: clean,
+                        });
+                        onNotify(`Titre personnalisé équipé : ${clean}`);
+                      }}
+                      className="px-4 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold text-xs shrink-0"
+                    >
+                      Valider
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </section>
@@ -866,10 +1292,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                         <div className="flex items-center gap-2 min-w-0">
                           <span className={`font-mono-num w-7 shrink-0 ${rankClass}`}>#{idx + 1}</span>
                           <span
-                            className="w-6 h-6 rounded-md flex items-center justify-center text-sm shrink-0"
-                            style={{ backgroundColor: `${entry.avatarColor}25`, color: entry.avatarColor }}
+                            className="w-7 h-7 rounded-md p-1 flex items-center justify-center shrink-0"
+                            style={{ backgroundColor: entry.avatarColor || '#7ebcff' }}
                           >
-                            {entry.avatarSymbol}
+                            <ChessPieceArtwork
+                              symbol={entry.avatarSymbol || '♔'}
+                              mode="emblem"
+                              bgColor={entry.avatarColor || '#7ebcff'}
+                              className="w-5 h-5"
+                            />
                           </span>
                           <span className="font-semibold truncate">
                             {entry.nickname}

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Check,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -7,6 +8,9 @@ import {
   Pause,
   Play,
   Star,
+  User,
+  UserCheck,
+  UserPlus,
   X,
 } from 'lucide-react';
 import {
@@ -16,6 +20,7 @@ import {
 } from '../engine/chessEngine';
 import type {
   AppSettings,
+  FriendEntry,
   GameRecord,
   PieceDef,
   Variant,
@@ -29,7 +34,11 @@ interface HistoryViewProps {
   variants: Variant[];
   customPieces: PieceDef[];
   settings: AppSettings;
+  friends?: FriendEntry[];
+  sentFriendRequestUids?: string[];
   onRateVariant: (variantId: string, stars: number) => void;
+  onOpenPlayerProfile?: (record: GameRecord) => void;
+  onSendFriendRequestFromRecord?: (record: GameRecord) => void;
 }
 
 export const HistoryView: React.FC<HistoryViewProps> = ({
@@ -38,13 +47,34 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   variants,
   customPieces,
   settings,
+  friends = [],
+  sentFriendRequestUids = [],
   onRateVariant,
+  onOpenPlayerProfile,
+  onSendFriendRequestFromRecord,
 }) => {
   const [selectedRecord, setSelectedRecord] = useState<GameRecord | null>(null);
   const [editingRating, setEditingRating] = useState(false);
   const [replayStep, setReplayStep] = useState<number>(0);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [showReplayBoard, setShowReplayBoard] = useState(false);
+  const [openOpponentMenuId, setOpenOpponentMenuId] = useState<string | null>(null);
+
+  const displayedHistory = history;
+
+  const isFriendRecord = (rec: GameRecord) =>
+    Boolean(rec.opponentUid && friends.some((f) => f.uid === rec.opponentUid));
+
+  const isRequestSentRecord = (rec: GameRecord) =>
+    Boolean(rec.opponentUid && sentFriendRequestUids.includes(rec.opponentUid));
+
+  const canSendFriendReq = (rec: GameRecord) =>
+    Boolean(
+      onSendFriendRequestFromRecord &&
+        rec.opponentUid &&
+        !rec.opponentUid.startsWith('ai_') &&
+        rec.type !== 'Variante créée'
+    );
 
   const resultLabel: Record<GameRecord['result'], { text: string; color: string }> = {
     win: { text: 'Victoire', color: 'text-emerald-400' },
@@ -97,76 +127,171 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           Historique des parties
         </h1>
         <p className="text-sm text-slate-600 dark:text-slate-400">
-          Ouvrez une partie pour la revoir coup par coup sur l’échiquier, consulter le détail ÉOL et modifier votre note.
+          Ouvrez une partie pour la revoir coup par coup ou cliquez sur un adversaire pour consulter son profil ou lui envoyer une demande d’ami.
         </p>
       </div>
 
-      {history.length === 0 ? (
+      {displayedHistory.length === 0 ? (
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] p-8 text-center text-sm text-slate-500">
           Aucune partie ou analyse enregistrée pour le moment.
         </div>
       ) : (
         <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27] divide-y divide-slate-200 dark:divide-slate-800 overflow-hidden">
-          {history.map((rec) => {
+          {displayedHistory.map((rec) => {
             const rInfo = resultLabel[rec.result];
             const currentRating = rec.variantId ? ratings[rec.variantId] || 0 : 0;
             const delta = rec.eolBreakdown?.counted ? rec.eolBreakdown.delta : null;
             const hasReplay = Boolean(rec.replayMoves && rec.replayMoves.length > 0);
+            const hasOpponent = rec.type !== 'Variante créée' && Boolean(rec.opponentName);
+            const menuOpen = openOpponentMenuId === rec.id;
+            const alreadyFriend = isFriendRecord(rec);
+            const alreadySent = isRequestSentRecord(rec);
 
             return (
-              <button
+              <div
                 key={rec.id}
-                type="button"
-                onClick={() => {
-                  setSelectedRecord(rec);
-                  setEditingRating(false);
-                  setReplayPlaying(false);
-                  setReplayStep(0);
-                  setShowReplayBoard(hasReplay);
-                }}
-                className="w-full flex items-center justify-between gap-3 p-4 text-left hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors min-h-[68px]"
+                className="p-4 hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors"
               >
-                <div className="min-w-0 space-y-0.5">
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold text-slate-900 dark:text-slate-100 truncate">
-                      {rec.variantName}
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    setSelectedRecord(rec);
+                    setEditingRating(false);
+                    setReplayPlaying(false);
+                    setReplayStep(0);
+                    setShowReplayBoard(hasReplay);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setSelectedRecord(rec);
+                      setEditingRating(false);
+                      setReplayPlaying(false);
+                      setReplayStep(0);
+                      setShowReplayBoard(hasReplay);
+                    }
+                  }}
+                  className="w-full flex items-center justify-between gap-3 text-left cursor-pointer min-h-[52px]"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-slate-900 dark:text-slate-100 truncate">
+                        {rec.variantName}
+                      </span>
+                      <span className={`text-xs font-semibold ${rInfo.color}`}>
+                        {rInfo.text}
+                      </span>
+                      {hasReplay && (
+                        <span className="text-[11px] font-medium text-sky-400">
+                          · Replay disponible
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                      <span>
+                        {rec.type}
+                        {rec.competitive === false ? ' (Amical)' : ''} ·
+                      </span>
+                      {hasOpponent ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenOpponentMenuId(menuOpen ? null : rec.id);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-sky-500/35 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20 font-semibold transition-colors"
+                          title="Cliquer pour voir le profil ou demander en ami"
+                        >
+                          <span>vs {rec.opponentName}</span>
+                          {rec.opponentEol ? (
+                            <span className="font-mono-num text-[11px] opacity-85">
+                              ({rec.opponentEol} ÉOL)
+                            </span>
+                          ) : null}
+                        </button>
+                      ) : (
+                        <span>{rec.opponentName}</span>
+                      )}
+                      <span>· {new Date(rec.date).toLocaleDateString('fr-FR')}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-4 shrink-0">
+                    {delta !== null && (
+                      <span
+                        className={`text-sm font-bold font-mono-num ${
+                          delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                        }`}
+                      >
+                        {delta >= 0 ? '+' : ''}
+                        {delta} ÉOL
+                      </span>
+                    )}
+                    {currentRating > 0 && (
+                      <span className="inline-flex items-center gap-1 text-xs font-mono-num text-amber-400">
+                        <Star className="w-3.5 h-3.5 fill-amber-400" />
+                        {currentRating}/5
+                      </span>
+                    )}
+                    <ChevronRight className="w-4 h-4 text-slate-400" />
+                  </div>
+                </div>
+
+                {menuOpen && hasOpponent && (
+                  <div className="mt-2.5 pt-2.5 border-t border-slate-200 dark:border-slate-800/80 flex flex-wrap items-center gap-2">
+                    <span className="text-[11px] text-slate-400 mr-1">
+                      {rec.opponentName} :
                     </span>
-                    <span className={`text-xs font-semibold ${rInfo.color}`}>
-                      {rInfo.text}
-                    </span>
-                    {hasReplay && (
-                      <span className="text-[11px] font-medium text-sky-400">
-                        · Replay disponible
+                    {onOpenPlayerProfile && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpenOpponentMenuId(null);
+                          onOpenPlayerProfile(rec);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold"
+                      >
+                        <User className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Profil</span>
+                      </button>
+                    )}
+                    {alreadyFriend ? (
+                      <span className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-semibold">
+                        <UserCheck className="w-3.5 h-3.5" />
+                        <span>Déjà ami</span>
+                      </span>
+                    ) : canSendFriendReq(rec) ? (
+                      <button
+                        type="button"
+                        disabled={alreadySent}
+                        onClick={() => onSendFriendRequestFromRecord?.(rec)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold ${
+                          alreadySent
+                            ? 'bg-emerald-500/15 border border-emerald-500/35 text-emerald-300'
+                            : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
+                        }`}
+                      >
+                        {alreadySent ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Demande envoyée</span>
+                          </>
+                        ) : (
+                          <>
+                            <UserPlus className="w-3.5 h-3.5" />
+                            <span>Demande d’ami</span>
+                          </>
+                        )}
+                      </button>
+                    ) : (
+                      <span className="text-[11px] text-slate-500">
+                        (Adversaire local / IA)
                       </span>
                     )}
                   </div>
-                  <div className="text-xs text-slate-500 dark:text-slate-400 truncate">
-                    {rec.type}
-                    {rec.competitive === false ? ' (Amical)' : ''} · vs {rec.opponentName} ·{' '}
-                    {new Date(rec.date).toLocaleDateString('fr-FR')}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-4 shrink-0">
-                  {delta !== null && (
-                    <span
-                      className={`text-sm font-bold font-mono-num ${
-                        delta >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                      }`}
-                    >
-                      {delta >= 0 ? '+' : ''}
-                      {delta} ÉOL
-                    </span>
-                  )}
-                  {currentRating > 0 && (
-                    <span className="inline-flex items-center gap-1 text-xs font-mono-num text-amber-400">
-                      <Star className="w-3.5 h-3.5 fill-amber-400" />
-                      {currentRating}/5
-                    </span>
-                  )}
-                  <ChevronRight className="w-4 h-4 text-slate-400" />
-                </div>
-              </button>
+                )}
+              </div>
             );
           })}
         </div>
@@ -347,12 +472,48 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
             )}
 
             <div className="grid grid-cols-2 gap-3 text-xs p-3.5 rounded-xl bg-slate-50 dark:bg-[#0f151f] border border-slate-200 dark:border-slate-800">
-              <div>
+              <div className="space-y-1.5">
                 <span className="text-slate-400 block">Adversaire</span>
-                <span className="font-semibold text-slate-900 dark:text-slate-100">
+                <span className="font-semibold text-slate-900 dark:text-slate-100 block">
                   {selectedRecord.opponentName}
                   {selectedRecord.opponentEol ? ` (${selectedRecord.opponentEol} ÉOL)` : ''}
                 </span>
+                {selectedRecord.type !== 'Variante créée' && selectedRecord.opponentName && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                    {onOpenPlayerProfile && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenPlayerProfile(selectedRecord)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-[11px] font-semibold"
+                      >
+                        <User className="w-3 h-3 text-sky-400" />
+                        <span>Profil</span>
+                      </button>
+                    )}
+                    {isFriendRecord(selectedRecord) ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[11px] font-semibold">
+                        <UserCheck className="w-3 h-3" />
+                        <span>Ami</span>
+                      </span>
+                    ) : canSendFriendReq(selectedRecord) ? (
+                      <button
+                        type="button"
+                        disabled={isRequestSentRecord(selectedRecord)}
+                        onClick={() => onSendFriendRequestFromRecord?.(selectedRecord)}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold ${
+                          isRequestSentRecord(selectedRecord)
+                            ? 'bg-emerald-500/15 border border-emerald-500/35 text-emerald-300'
+                            : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
+                        }`}
+                      >
+                        <UserPlus className="w-3 h-3" />
+                        <span>
+                          {isRequestSentRecord(selectedRecord) ? 'Envoyée' : 'Demande d’ami'}
+                        </span>
+                      </button>
+                    ) : null}
+                  </div>
+                )}
               </div>
               <div>
                 <span className="text-slate-400 block">Résultat</span>

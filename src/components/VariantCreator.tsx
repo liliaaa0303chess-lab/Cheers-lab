@@ -11,8 +11,11 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import {
+  getForwardDirection,
+  inferSideForwardDirections,
   makeDefaultBoard,
   makeStandardSetup,
+  normalizePieceRef,
   PLAYER_SIDES,
   SIDE_LABELS,
 } from '../engine/chessEngine';
@@ -38,6 +41,7 @@ import type {
 } from '../types/chess';
 import { BoardEditor } from './BoardEditor';
 import { ChessBoard } from './ChessBoard';
+import { ChessPieceArtwork } from './ChessPieceArtwork';
 import { validateFamilyFriendlyText } from '../utils/moderation';
 import { safeUuid } from '../utils/safeId';
 
@@ -45,6 +49,7 @@ interface VariantCreatorProps {
   profile: Profile;
   pieces: PieceDef[];
   settings: AppSettings;
+  canUseGoldNight?: boolean;
   draft: Variant;
   onChangeDraft: (next: Variant) => void;
   onSaveVariant: (variant: Variant) => void;
@@ -96,6 +101,7 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
   profile,
   pieces,
   settings,
+  canUseGoldNight = false,
   draft,
   onChangeDraft,
   onSaveVariant,
@@ -115,12 +121,30 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
     [draft.players]
   );
 
+  const customPieceMap = useMemo(() => {
+    const map: Record<string, PieceDef> = {};
+    for (const p of pieces) map[p.id] = p;
+    return map;
+  }, [pieces]);
+
   const controlledDiff = useMemo(() => {
     const customDefs = pieces.filter((p) => draft.pieces.includes(p.id));
     return computeControlledDifficulty({ ...draft, customPieceDefs: customDefs });
   }, [draft, pieces]);
 
   const compiledRules = useMemo(() => compileVariantRules(draft, pieces), [draft, pieces]);
+
+  const inferredForwardDirs = useMemo(
+    () => inferSideForwardDirections(draft.setup, draft.board, customPieceMap, compiledRules),
+    [draft.setup, draft.board, customPieceMap, compiledRules]
+  );
+
+  const formatDirArrow = (dir: [number, number]) => {
+    if (dir[0] === -1) return '↑';
+    if (dir[0] === 1) return '↓';
+    if (dir[1] === 1) return '→';
+    return '←';
+  };
 
   const ruleConstraints = draft.ruleConstraints || {};
 
@@ -182,31 +206,98 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
   };
 
   const handleResetStandardSetup = () => {
-    if (draft.board.rows === 8 && draft.board.cols === 8) {
+    const numPlayers = Math.max(2, Math.min(6, draft.players || 2));
+    if (numPlayers === 2 && draft.board.rows === 8 && draft.board.cols === 8) {
       onChangeDraft({ ...draft, setup: makeStandardSetup() });
       onNotify('Position standard 8×8 rétablie.');
       return;
     }
-    // Generic symmetrical placement for custom board dimensions
+
     const next: Record<number, string> = {};
     const { rows, cols, cells, blocked } = draft.board;
-    const isUsable = (idx: number) => cells[idx] !== 0 && !blocked.includes(idx);
+    const isUsable = (r: number, c: number) => {
+      if (r < 0 || r >= rows || c < 0 || c >= cols) return false;
+      const idx = r * cols + c;
+      return cells[idx] !== 0 && !blocked.includes(idx);
+    };
+    const placeIfFree = (r: number, c: number, pieceId: string, side: PlayerSide) => {
+      if (!isUsable(r, c)) return;
+      const idx = r * cols + c;
+      if (!next[idx]) next[idx] = `${pieceId}|${side}`;
+    };
+
     const back = ['builtin:R', 'builtin:N', 'builtin:B', 'builtin:Q', 'builtin:K', 'builtin:B', 'builtin:N', 'builtin:R'];
-    for (let c = 0; c < cols; c++) {
-      const topIdx = c;
-      const botIdx = (rows - 1) * cols + c;
-      const pieceId = back[c % back.length];
-      if (isUsable(topIdx)) next[topIdx] = `${pieceId}|black`;
-      if (isUsable(botIdx)) next[botIdx] = `${pieceId}|white`;
-      if (rows >= 4) {
-        const topPawn = cols + c;
-        const botPawn = (rows - 2) * cols + c;
-        if (isUsable(topPawn)) next[topPawn] = 'builtin:P|black';
-        if (isUsable(botPawn)) next[botPawn] = 'builtin:P|white';
+    const smallArmy = ['builtin:R', 'builtin:K', 'builtin:Q', 'builtin:B', 'builtin:N', 'builtin:R'];
+
+    if (numPlayers === 2) {
+      for (let c = 0; c < cols; c++) {
+        const pieceId = back[c % back.length];
+        placeIfFree(0, c, pieceId, 'black');
+        placeIfFree(rows - 1, c, pieceId, 'white');
+        if (rows >= 4) {
+          placeIfFree(1, c, 'builtin:P', 'black');
+          placeIfFree(rows - 2, c, 'builtin:P', 'white');
+        }
+      }
+    } else if (numPlayers <= 4) {
+      const colStart = cols >= 6 ? (numPlayers === 3 ? 1 : 2) : 0;
+      const colEnd = cols >= 6 ? cols - (numPlayers === 3 ? 1 : 2) : cols;
+      for (let c = colStart; c < colEnd; c++) {
+        const localIdx = c - colStart;
+        const pid = localIdx === Math.floor((colEnd - colStart) / 2) ? 'builtin:K' : smallArmy[localIdx % smallArmy.length];
+        placeIfFree(rows - 1, c, pid, 'white');
+        placeIfFree(0, c, pid, 'black');
+        if (rows >= 5) {
+          placeIfFree(rows - 2, c, 'builtin:P', 'white');
+          placeIfFree(1, c, 'builtin:P', 'black');
+        }
+      }
+      const rowStart = rows >= 6 ? 2 : 1;
+      const rowEnd = rows >= 6 ? rows - 2 : rows - 1;
+      for (let r = rowStart; r < rowEnd; r++) {
+        const localIdx = r - rowStart;
+        const pid = localIdx === Math.floor((rowEnd - rowStart) / 2) ? 'builtin:K' : smallArmy[localIdx % smallArmy.length];
+        placeIfFree(r, 0, pid, 'red');
+        if (cols >= 5) placeIfFree(r, 1, 'builtin:P', 'red');
+        if (numPlayers >= 4) {
+          placeIfFree(r, cols - 1, pid, 'blue');
+          if (cols >= 5) placeIfFree(r, cols - 2, 'builtin:P', 'blue');
+        }
+      }
+    } else {
+      // 5 ou 6 joueurs : Blancs/Or et Noirs/Verts répartis sur les ailes haut/bas, Rouges/Bleus sur les côtés
+      const midC = Math.floor(cols / 2);
+      const wingLeftStart = cols >= 8 ? 1 : 0;
+      const wingRightEnd = cols >= 8 ? cols - 1 : cols;
+      const placeWing = (rowBack: number, rowPawn: number, cFrom: number, cTo: number, side: PlayerSide) => {
+        const span = Math.max(1, cTo - cFrom);
+        for (let c = cFrom; c < cTo; c++) {
+          const i = c - cFrom;
+          const pid = i === Math.floor(span / 2) ? 'builtin:K' : smallArmy[i % smallArmy.length];
+          placeIfFree(rowBack, c, pid, side);
+          if (rows >= 5) placeIfFree(rowPawn, c, 'builtin:P', side);
+        }
+      };
+      placeWing(rows - 1, rows - 2, wingLeftStart, midC, 'white');
+      placeWing(rows - 1, rows - 2, midC, wingRightEnd, 'green');
+      placeWing(0, 1, wingLeftStart, midC, 'black');
+      if (numPlayers >= 6) {
+        placeWing(0, 1, midC, wingRightEnd, 'gold');
+      }
+      const rowStart = rows >= 6 ? 2 : 1;
+      const rowEnd = rows >= 6 ? rows - 2 : rows - 1;
+      for (let r = rowStart; r < rowEnd; r++) {
+        const localIdx = r - rowStart;
+        const pid = localIdx === Math.floor((rowEnd - rowStart) / 2) ? 'builtin:K' : smallArmy[localIdx % smallArmy.length];
+        placeIfFree(r, 0, pid, 'red');
+        if (cols >= 5) placeIfFree(r, 1, 'builtin:P', 'red');
+        placeIfFree(r, cols - 1, pid, 'blue');
+        if (cols >= 5) placeIfFree(r, cols - 2, 'builtin:P', 'blue');
       }
     }
+
     onChangeDraft({ ...draft, setup: next });
-    onNotify('Position initiale adaptée au plateau appliquée.');
+    onNotify(`Position initiale pour ${numPlayers} camps appliquée.`);
   };
 
   const handleBuildFinalVariant = (): Variant | null => {
@@ -250,7 +341,13 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
         usedCustomIds.add(pid);
       }
     }
-    const customDefs = pieces.filter((p) => usedCustomIds.has(p.id));
+    const customDefs = pieces
+      .filter((p) => usedCustomIds.has(p.id))
+      .map((p) => (draft.visibility === 'public' ? { ...p, visibility: 'public' as const } : p));
+    const finalBoard: BoardConfig =
+      draft.visibility === 'public'
+        ? { ...draft.board, visibility: 'public' }
+        : draft.board;
     const isEdit = Boolean(draft.id);
     const nextVersionNumber = (draft.versions?.length || 0) + 1;
     const newVersion = {
@@ -264,10 +361,12 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
       ...draft,
       id: draft.id || `var_${safeUuid().slice(0, 10)}`,
       name: draft.name.trim(),
+      board: finalBoard,
       pieces: Array.from(usedCustomIds),
       customPieceDefs: customDefs,
       controlledDifficulty: computeControlledDifficulty({
         ...draft,
+        board: finalBoard,
         customPieceDefs: customDefs,
       }),
       creatorId: draft.creatorId || profile.id,
@@ -365,6 +464,11 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
               <option value="public">Publique (visible et jouable par tous)</option>
               <option value="link">Par lien (accessible via lien partagé)</option>
             </select>
+            {draft.visibility === 'public' && (
+              <span className="block text-[11px] text-sky-400 pt-0.5">
+                Les pièces et le plateau utilisés deviennent automatiquement publics.
+              </span>
+            )}
           </label>
         </div>
 
@@ -421,6 +525,7 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
         <BoardEditor
           board={draft.board}
           settings={settings}
+          canUseGoldNight={canUseGoldNight}
           onChange={(nextBoard) => onChangeDraft({ ...draft, board: nextBoard })}
           onSaveBoardToLibrary={onSaveBoard}
           onNotify={onNotify}
@@ -770,6 +875,7 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
                 ['specialProtected', 'Cases spéciales ✦ = Zone protégée'],
                 ['specialCaptureOnly', 'Captures uniquement sur/depuis ✦'],
                 ['noCheckRestriction', "Ignorer l'échec (capture directe du Roi)"],
+                ['allowPieceDrops', 'Parachutage : reposer les pièces capturées sur le plateau'],
               ] as const
             ).map(([key, label]) => (
               <label
@@ -1078,20 +1184,32 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
                 Camp à placer
               </div>
               <div className="flex flex-wrap gap-1.5">
-                {activeSides.map((s) => (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => setSetupSide(s)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors min-h-[38px] ${
-                      setupSide === s
-                        ? 'bg-sky-500 text-slate-950 border-sky-400'
-                        : 'bg-white dark:bg-[#151c27] border-slate-300 dark:border-slate-700'
-                    }`}
-                  >
-                    {SIDE_LABELS[s]}
-                  </button>
-                ))}
+                {activeSides.map((s) => {
+                  const dirArrow = formatDirArrow(
+                    getForwardDirection({ forwardDirections: inferredForwardDirs }, s)
+                  );
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setSetupSide(s)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors min-h-[38px] inline-flex items-center gap-1.5 ${
+                        setupSide === s
+                          ? 'bg-sky-500 text-slate-950 border-sky-400'
+                          : 'bg-white dark:bg-[#151c27] border-slate-300 dark:border-slate-700'
+                      }`}
+                    >
+                      <span>{SIDE_LABELS[s]}</span>
+                      <span className="opacity-75 font-mono-num">{dirArrow}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5">
+                Sens de progression détecté pour {SIDE_LABELS[setupSide]} :{' '}
+                <span className="font-bold text-sky-400">
+                  {formatDirArrow(inferredForwardDirs[setupSide])}
+                </span>
               </div>
             </div>
 
@@ -1111,8 +1229,14 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
                         : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-[#151c27]'
                     }`}
                   >
-                    <span className={`text-xl piece-glyph piece-side-${setupSide}`}>
-                      {setupSide === 'white' ? cp.symbolWhite : cp.symbolBlack}
+                    <span className="w-6 h-6 shrink-0 flex items-center justify-center">
+                      <ChessPieceArtwork
+                        pieceId={cp.id}
+                        symbol={cp.symbolWhite}
+                        side={setupSide}
+                        texture={settings.pieceTexture}
+                        mode="board"
+                      />
                     </span>
                     <span className="text-xs truncate">{cp.name}</span>
                   </button>
@@ -1143,7 +1267,17 @@ export const VariantCreator: React.FC<VariantCreatorProps> = ({
                           : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-[#151c27]'
                       }`}
                     >
-                      <span className={`text-xl piece-glyph piece-side-${setupSide}`}>{cp.symbol}</span>
+                      <span className="w-6 h-6 shrink-0 flex items-center justify-center">
+                        <ChessPieceArtwork
+                          pieceId={cp.id}
+                          symbol={cp.symbol}
+                          side={setupSide}
+                          texture={settings.pieceTexture === 'plain' ? cp.texture : settings.pieceTexture}
+                          lightColor={cp.light}
+                          darkColor={cp.dark}
+                          mode="board"
+                        />
+                      </span>
                       <span className="truncate">{cp.name}</span>
                     </button>
                   ))}

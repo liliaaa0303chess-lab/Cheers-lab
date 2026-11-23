@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Crown, PartyPopper, Play, Sparkles, X } from 'lucide-react';
 import { BOT_REBELLION_EXCUSES, SECRET_REBELLION_PIECE } from '../utils/botChallenge';
+import { ChessPieceArtwork } from './ChessPieceArtwork';
 
 interface BotRebellionModalProps {
   open: boolean;
@@ -42,9 +43,9 @@ export const BotRebellionModal: React.FC<BotRebellionModalProps> = ({
             <span
               key={i}
               style={{ left, top, animationDelay: delay }}
-              className="absolute text-xl sm:text-2xl opacity-35 animate-bounce motion-reduce:animate-none"
+              className="absolute w-7 h-7 sm:w-8 sm:h-8 opacity-40 animate-bounce motion-reduce:animate-none"
             >
-              {sym}
+              <ChessPieceArtwork symbol={sym} side="gold" mode="board" />
             </span>
           );
         })}
@@ -122,8 +123,13 @@ export const BotRebellionModal: React.FC<BotRebellionModalProps> = ({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs">
             <div className="rounded-xl border border-slate-700/80 bg-[#121824] p-3 flex items-start gap-3">
-              <span className="w-10 h-10 rounded-xl bg-amber-400/20 border border-amber-400/40 flex items-center justify-center text-2xl shrink-0">
-                {SECRET_REBELLION_PIECE.symbol}
+              <span className="w-10 h-10 rounded-xl bg-amber-400/20 border border-amber-400/40 flex items-center justify-center p-1.5 shrink-0">
+                <ChessPieceArtwork
+                  pieceId={SECRET_REBELLION_PIECE.id}
+                  symbol={SECRET_REBELLION_PIECE.symbol}
+                  side="gold"
+                  mode="board"
+                />
               </span>
               <div className="min-w-0">
                 <div className="font-bold text-white">

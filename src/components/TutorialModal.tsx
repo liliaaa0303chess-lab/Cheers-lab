@@ -23,10 +23,10 @@ const TUTORIAL_STEPS: TutorialStep[] = [
     body: (
       <div className="space-y-1.5">
         <p className="text-sm text-slate-100 font-medium leading-snug">
-          Bienvenue sur Chess Lab ! Ici, vous pouvez créer vos propres variantes d’échecs et y jouer librement.
+          Bienvenue sur Chess Lab ! Inventez vos propres variantes d’échecs, affrontez l’IA ou de vrais joueurs et suivez votre ÉOL.
         </p>
         <p className="text-xs text-slate-400 leading-snug">
-          Petit tour rapide pour vous montrer à quoi servent les boutons principaux.
+          Visite rapide des nouveautés et des boutons essentiels.
         </p>
       </div>
     ),
@@ -35,23 +35,23 @@ const TUTORIAL_STEPS: TutorialStep[] = [
     targets: ['home-quick-grid'],
     scrollMode: 'frame',
     dock: 'bottom',
-    title: 'Les 5 boutons de l’accueil',
+    title: 'Les 5 accès principaux',
     body: (
       <ul className="space-y-1 text-[11px] sm:text-xs text-slate-300 leading-snug">
         <li>
           <strong className="text-sky-300">Créer</strong> : inventer vos plateaux, pièces et règles.
         </li>
         <li>
-          <strong className="text-white">Découvrir</strong> : essayer les variantes des autres joueurs.
+          <strong className="text-white">Découvrir</strong> : essayer les variantes publiques des joueurs.
         </li>
         <li>
-          <strong className="text-white">Jouer</strong> : lancer une partie tout de suite.
+          <strong className="text-white">Jouer</strong> : lancer une partie contre l’IA (jusqu’à 20 niveaux), en ligne ou en local.
         </li>
         <li>
-          <strong className="text-white">Historique</strong> : revoir vos coups et vos scores.
+          <strong className="text-white">Historique</strong> : revoir vos coups, profils adverses et scores ÉOL.
         </li>
         <li>
-          <strong className="text-white">Bibliothèque</strong> : retrouver toutes vos créations.
+          <strong className="text-white">Bibliothèque</strong> : gérer variantes, plateaux, pièces et amis.
         </li>
       </ul>
     ),
@@ -60,37 +60,52 @@ const TUTORIAL_STEPS: TutorialStep[] = [
     targets: ['bottom-library', 'nav-library'],
     scrollMode: 'none',
     dock: 'above-target',
-    title: 'Bibliothèque (menu du bas)',
+    title: 'Bibliothèque : Variantes, Plateaux, Pièces & Amis',
     body: (
-      <p className="text-xs sm:text-sm text-slate-200 leading-relaxed">
-        Toujours accessible depuis le menu du bas (ou du haut sur ordinateur) pour retrouver vos{' '}
-        <strong className="text-white">variantes, plateaux, pièces et thèmes</strong>.
-      </p>
+      <div className="space-y-1.5 text-xs text-slate-200 leading-relaxed">
+        <p>
+          La Bibliothèque regroupe en menus dépliants vos <strong className="text-white">Variantes</strong>,{' '}
+          <strong className="text-white">Plateaux</strong>, <strong className="text-white">Pièces</strong> et votre liste d’<strong className="text-white">Amis</strong>.
+        </p>
+        <div className="rounded-lg bg-sky-500/10 border border-sky-400/25 px-2.5 py-1.5 text-[11px] text-slate-200">
+          Vous pouvez choisir <strong className="text-white">Privé</strong> ou <strong className="text-emerald-300">Public</strong> sur vos pièces et plateaux. Attention : si une variante est publique, son plateau et ses pièces le sont automatiquement !
+        </div>
+      </div>
+    ),
+  },
+  {
+    targets: ['home-history', 'nav-history'],
+    scrollMode: 'frame',
+    dock: 'bottom',
+    title: 'Historique, Profils & Demandes d’ami',
+    body: (
+      <div className="space-y-1.5 text-xs text-slate-200 leading-relaxed">
+        <p>
+          Dans <strong className="text-white">Historique</strong>, cliquez sur un adversaire déjà affronté pour ouvrir son{' '}
+          <strong className="text-sky-300">Profil</strong> (variantes, pièces et plateaux publics) ou envoyer une{' '}
+          <strong className="text-emerald-300">Demande d’ami</strong>.
+        </p>
+        <p className="text-[11px] text-slate-300">
+          Une fois accepté, votre ami apparaît dans <strong className="text-white">Bibliothèque → Amis</strong> avec un{' '}
+          <strong className="text-emerald-400">point vert</strong> s’il est connecté pour lui proposer une revanche à tout moment !
+        </p>
+      </div>
     ),
   },
   {
     targets: ['home-settings', 'home-eol-profile', 'nav-settings'],
     scrollMode: 'top',
     dock: 'bottom',
-    title: 'Les boutons Paramètres',
+    title: 'Carte de combat, ÉOL & Paramètres',
     body: (
-      <p className="text-xs sm:text-sm text-slate-200 leading-relaxed">
-        Accédez aux réglages via <strong className="text-sky-300">Paramètres</strong> sur l’accueil, votre{' '}
-        <strong className="text-white">carte profil</strong> ou votre badge{' '}
-        <strong className="text-sky-300">ÉOL</strong> en haut à droite.
-      </p>
-    ),
-  },
-  {
-    targets: ['home-eol-metric', 'nav-settings'],
-    scrollMode: 'top',
-    dock: 'bottom',
-    title: 'Le système ÉOL',
-    body: (
-      <p className="text-xs sm:text-sm text-slate-200 leading-relaxed">
-        L’<strong className="text-sky-300">ÉOL</strong> est un classement qui mesure{' '}
-        <strong className="text-white">ta capacité à t’adapter à des variantes d’échecs</strong>. Tout le monde démarre à 400 ÉOL.
-      </p>
+      <div className="space-y-1.5 text-xs text-slate-200 leading-relaxed">
+        <p>
+          Personnalisez votre <strong className="text-sky-300">Carte de combat</strong> (affichée en plein écran face à l’adversaire avant chaque partie) et vos thèmes dans <strong className="text-white">Paramètres</strong>.
+        </p>
+        <p className="text-[11px] text-slate-300">
+          L’<strong className="text-sky-300">ÉOL</strong> mesure votre capacité à vous adapter aux variantes (départ à 400 ÉOL).
+        </p>
+      </div>
     ),
   },
   {
@@ -101,14 +116,13 @@ const TUTORIAL_STEPS: TutorialStep[] = [
     body: (
       <div className="space-y-1.5 text-xs leading-relaxed">
         <p className="text-slate-200">
-          <strong className="text-white">Jouez à vos variantes ou à celles des autres</strong> contre une{' '}
-          <strong className="text-white">IA</strong>, <strong className="text-white">en ligne</strong>, avec un{' '}
-          <strong className="text-white">humain en face à face</strong> ou en mode{' '}
+          <strong className="text-white">Jouez à vos variantes ou à celles de la communauté</strong> contre l’<strong className="text-white">IA</strong>,{' '}
+          <strong className="text-white">en ligne</strong>, en <strong className="text-white">face à face</strong> ou en mode{' '}
           <strong className="text-white">Analyse</strong>.
         </p>
         <div className="rounded-lg bg-sky-500/10 border border-sky-400/25 px-2.5 py-1.5 text-slate-200">
-          Contre l’IA ou en face à face, vous choisissez avant la partie :{' '}
-          <strong className="text-amber-300">Compétitif (avec ÉOL)</strong> ou{' '}
+          Avant de lancer, choisissez librement entre{' '}
+          <strong className="text-amber-300">Compétitif (avec ÉOL)</strong> et{' '}
           <strong className="text-emerald-300">Amical (sans ÉOL)</strong>.
         </div>
       </div>

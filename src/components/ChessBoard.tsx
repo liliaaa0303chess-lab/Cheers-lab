@@ -1,11 +1,16 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
-import { getPieceDisplaySymbol, type BoardPieceInstance } from '../engine/chessEngine';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  getPieceDisplaySymbol,
+  normalizePieceRef,
+  type BoardPieceInstance,
+} from '../engine/chessEngine';
 import type {
   AppSettings,
   BoardConfig,
   PieceDef,
   PlayerSide,
 } from '../types/chess';
+import { ChessPieceArtwork } from './ChessPieceArtwork';
 
 interface ChessBoardProps {
   board: BoardConfig;
@@ -22,12 +27,27 @@ interface ChessBoardProps {
   legalTargets?: number[];
   captureTargets?: number[];
   powerTargets?: number[];
+  premoveTargets?: number[];
+  premoveSquares?: { from: number; to: number } | null;
   lastMove?: { from: number; to: number } | null;
   inCheckSquares?: number[];
   viewerSide?: PlayerSide | null;
   compact?: boolean;
   fullscreen?: boolean;
   isMyTurnHighlight?: boolean;
+  gameWon?: boolean;
+  goldEffects?: {
+    goldLastMove?: boolean;
+    captureSparks?: boolean;
+    checkPulse?: boolean;
+    powerShimmer?: boolean;
+    victoryCrownFrame?: boolean;
+    boardGoldSheen?: boolean;
+    turnAura?: boolean;
+  };
+  canDragSquare?: (index: number) => boolean;
+  onPieceDrop?: (from: number, to: number) => void;
+  onBoardContextMenu?: () => void;
   onCellClick?: (index: number) => void;
 }
 
@@ -36,6 +56,32 @@ interface SlideAnimState {
   dxPct: number;
   dyPct: number;
   active: boolean;
+}
+
+interface DragGhostState {
+  from: number;
+  clientX: number;
+  clientY: number;
+  hoverSquare: number | null;
+  sizePx: number;
+  pieceId?: string;
+  symbol: string;
+  side: PlayerSide;
+  texture: string;
+  lightColor?: string;
+  darkColor?: string;
+}
+
+function getSquareIdxAtPoint(clientX: number, clientY: number): number | null {
+  if (typeof document === 'undefined') return null;
+  const elements = document.elementsFromPoint(clientX, clientY);
+  for (const el of elements) {
+    if (el instanceof HTMLElement && el.dataset.squareIdx !== undefined) {
+      const idx = Number(el.dataset.squareIdx);
+      if (Number.isInteger(idx) && idx >= 0) return idx;
+    }
+  }
+  return null;
 }
 
 export const ChessBoard: React.FC<ChessBoardProps> = ({
@@ -49,12 +95,19 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   legalTargets = [],
   captureTargets = [],
   powerTargets = [],
+  premoveTargets = [],
+  premoveSquares = null,
   lastMove = null,
   inCheckSquares = [],
   viewerSide = null,
   compact = false,
   fullscreen = false,
   isMyTurnHighlight = false,
+  gameWon = false,
+  goldEffects,
+  canDragSquare,
+  onPieceDrop,
+  onBoardContextMenu,
   onCellClick,
 }) => {
   const customMap: Record<string, PieceDef> = {};
@@ -85,11 +138,88 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const flipBoard = viewerSide === 'black';
 
   const [slideAnim, setSlideAnim] = useState<SlideAnimState | null>(null);
+  const [dragGhost, setDragGhost] = useState<DragGhostState | null>(null);
   const lastMoveUidRef = useRef<string>('');
+  const suppressNextClickRef = useRef(false);
+
+  const selectedSquareRef = useRef(selectedSquare);
+  selectedSquareRef.current = selectedSquare;
+  const onCellClickRef = useRef(onCellClick);
+  onCellClickRef.current = onCellClick;
+  const onPieceDropRef = useRef(onPieceDrop);
+  onPieceDropRef.current = onPieceDrop;
+
+  const dragSessionRef = useRef<{
+    pointerId: number;
+    from: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+    meta: Omit<DragGhostState, 'from' | 'clientX' | 'clientY' | 'hoverSquare'>;
+  } | null>(null);
+
+  useEffect(() => {
+    const handlePointerMove = (e: PointerEvent) => {
+      const session = dragSessionRef.current;
+      if (!session || e.pointerId !== session.pointerId) return;
+
+      if (!session.moved) {
+        const dist = Math.hypot(e.clientX - session.startX, e.clientY - session.startY);
+        if (dist < 6) return;
+        session.moved = true;
+        if (selectedSquareRef.current !== session.from) {
+          onCellClickRef.current?.(session.from);
+        }
+      }
+
+      const hoverSquare = getSquareIdxAtPoint(e.clientX, e.clientY);
+      setDragGhost({
+        from: session.from,
+        clientX: e.clientX,
+        clientY: e.clientY,
+        hoverSquare,
+        ...session.meta,
+      });
+    };
+
+    const finishDrag = (e: PointerEvent, commitDrop: boolean) => {
+      const session = dragSessionRef.current;
+      if (!session || e.pointerId !== session.pointerId) return;
+      const wasMoved = session.moved;
+      const fromSq = session.from;
+      dragSessionRef.current = null;
+      setDragGhost(null);
+
+      if (wasMoved) {
+        suppressNextClickRef.current = true;
+        window.setTimeout(() => {
+          suppressNextClickRef.current = false;
+        }, 90);
+        if (commitDrop) {
+          const targetSq = getSquareIdxAtPoint(e.clientX, e.clientY);
+          if (targetSq !== null && targetSq !== fromSq) {
+            onPieceDropRef.current?.(fromSq, targetSq);
+          }
+        }
+      }
+    };
+
+    const onUp = (e: PointerEvent) => finishDrag(e, true);
+    const onCancel = (e: PointerEvent) => finishDrag(e, false);
+
+    window.addEventListener('pointermove', handlePointerMove, { passive: true });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+    };
+  }, []);
 
   // Smooth fast glide animation before paint (zero flicker) when a piece moves from -> to
   useLayoutEffect(() => {
-    if (!lastMove || lastMove.from === lastMove.to || !pieces) {
+    if (!lastMove || lastMove.from === lastMove.to || lastMove.from < 0 || !pieces) {
       setSlideAnim(null);
       return;
     }
@@ -148,6 +278,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const legalSet = new Set(legalTargets);
   const captureSet = new Set(captureTargets);
   const powerSet = new Set(powerTargets);
+  const premoveTargetSet = new Set(premoveTargets);
   const checkSet = new Set(inCheckSquares);
 
   const fontSizeClamp = fullscreen
@@ -171,6 +302,14 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       ? `min(70vw, ${Math.round(maxPx * 0.74)}px)`
       : `min(94vw, ${maxPx}px)`;
 
+  const handleSquareClick = (i: number) => {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      return;
+    }
+    onCellClick?.(i);
+  };
+
   return (
     <div
       className="w-full flex items-center justify-center overflow-visible"
@@ -180,10 +319,22 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       }}
     >
       <div
+        onContextMenu={(e) => {
+          if (onBoardContextMenu) {
+            e.preventDefault();
+            onBoardContextMenu();
+          }
+        }}
         className={`grid rounded-lg overflow-hidden select-none transition-colors duration-200 board-tex-${effectiveTexture} ${
-          isMyTurnHighlight
-            ? 'border-2 border-emerald-400 shadow-[0_0_26px_rgba(52,211,153,0.28)]'
-            : 'border-2 border-[#4f6076] shadow-xl'
+          gameWon && goldEffects?.victoryCrownFrame
+            ? 'border-4 border-amber-400 shadow-[0_0_34px_rgba(251,191,36,0.55)]'
+            : isMyTurnHighlight
+              ? goldEffects?.turnAura
+                ? 'border-2 border-amber-300 shadow-[0_0_30px_rgba(251,191,36,0.38)]'
+                : 'border-2 border-emerald-400 shadow-[0_0_26px_rgba(52,211,153,0.28)]'
+              : goldEffects?.boardGoldSheen
+                ? 'border-2 border-amber-500/55 shadow-[0_0_18px_rgba(245,158,11,0.2)]'
+                : 'border-2 border-[#4f6076] shadow-xl'
         }`}
         style={{
           width: boardWidthStyle,
@@ -192,7 +343,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
           gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
           transform: rotation ? `rotate(${rotation}deg)` : undefined,
           transformOrigin: 'center',
-          touchAction: 'manipulation',
+          touchAction: dragGhost ? 'none' : 'manipulation',
         }}
       >
         {Array.from({ length: rows * cols }, (_, visualPos) => {
@@ -207,12 +358,21 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
           const isLegal = legalSet.has(i);
           const isCapture = captureSet.has(i);
           const isPower = powerSet.has(i);
+          const isPremoveTarget = premoveTargetSet.has(i);
+          const isPremoveSq = Boolean(
+            premoveSquares && (premoveSquares.from === i || premoveSquares.to === i)
+          );
           const isLast = lastMove && (lastMove.from === i || lastMove.to === i);
           const isCheck = checkSet.has(i);
+          const isDragOrigin = dragGhost?.from === i;
+          const isDragHover = dragGhost?.hoverSquare === i && dragGhost.from !== i;
 
           // Resolve piece either from live GameState `pieces` or setupMap
+          let renderPieceId: string | undefined;
           let renderSym: string | null = null;
           let renderSide: PlayerSide = 'white';
+          let renderLight: string | undefined;
+          let renderDark: string | undefined;
           let isShielded = false;
           let isInvisible = false;
           let isFrozen = false;
@@ -223,34 +383,51 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
             if (inst.invisibleTurns > 0 && viewerSide && inst.side !== viewerSide) {
               renderSym = null;
             } else {
+              renderPieceId = inst.pieceId;
               renderSide = inst.side;
               renderSym = getPieceDisplaySymbol(inst.pieceId, inst.side, customMap);
               isShielded = inst.shielded;
               isInvisible = inst.invisibleTurns > 0;
               isFrozen = inst.frozenTurns > 0;
               const def = customMap[inst.pieceId];
-              if (def && pieceTexture === 'plain') {
-                pTex = def.texture || 'plain';
+              if (def) {
+                renderLight = def.light;
+                renderDark = def.dark;
+                if (pieceTexture === 'plain') {
+                  pTex = def.texture || 'plain';
+                }
               }
             }
           } else if (setupMap?.[i]) {
-            const raw = String(setupMap[i]);
-            const match = raw.match(/^(.*)\|(white|black|red|blue|green|gold)$/);
-            const pid = match ? match[1] : raw;
-            renderSide = (match ? match[2] : 'white') as PlayerSide;
-            renderSym = getPieceDisplaySymbol(pid, renderSide, customMap);
+            const norm = normalizePieceRef(String(setupMap[i]));
+            renderPieceId = norm.pieceId;
+            renderSide = norm.side;
+            renderSym = getPieceDisplaySymbol(norm.pieceId, renderSide, customMap);
+            const def = customMap[norm.pieceId];
+            if (def) {
+              renderLight = def.light;
+              renderDark = def.dark;
+              if (pieceTexture === 'plain') {
+                pTex = def.texture || 'plain';
+              }
+            }
           }
 
           if (!isActive) {
             return (
               <div
                 key={i}
-                onClick={() => onCellClick?.(i)}
+                data-square-idx={i}
+                onClick={() => handleSquareClick(i)}
                 className="min-w-0 min-h-0 bg-transparent cursor-pointer"
                 aria-label={`Case ${r + 1}-${c + 1} supprimée`}
               />
             );
           }
+
+          const draggableHere = Boolean(
+            renderSym && !isBlocked && onPieceDrop && canDragSquare?.(i)
+          );
 
           const squareBgStyle =
             effectiveTexture === 'plain' && !isBlocked
@@ -272,18 +449,63 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
             <button
               key={i}
               type="button"
-              onClick={() => onCellClick?.(i)}
+              data-square-idx={i}
+              onClick={() => handleSquareClick(i)}
+              onPointerDown={(e) => {
+                if (!draggableHere || !renderSym) return;
+                if (e.pointerType === 'mouse' && e.button !== 0) return;
+                const rect = e.currentTarget.getBoundingClientRect();
+                dragSessionRef.current = {
+                  pointerId: e.pointerId,
+                  from: i,
+                  startX: e.clientX,
+                  startY: e.clientY,
+                  moved: false,
+                  meta: {
+                    sizePx: Math.max(28, Math.min(rect.width, rect.height) * 0.92),
+                    pieceId: renderPieceId,
+                    symbol: renderSym,
+                    side: renderSide,
+                    texture: pTex,
+                    lightColor: renderLight,
+                    darkColor: renderDark,
+                  },
+                };
+              }}
               style={{
                 ...squareBgStyle,
                 fontSize: fontSizeClamp,
+                touchAction: draggableHere ? 'none' : undefined,
               }}
               className={`relative min-w-0 min-h-0 flex items-center justify-center p-0 border-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 ${
                 isDark ? 'cell-dark' : 'cell-light'
-              } ${isBlocked ? 'cell-blocked cursor-not-allowed' : 'cursor-pointer'} ${
-                isGlidingHere ? 'z-30' : isSelected ? 'z-10' : ''
-              } ${isSelected ? 'ring-3 ring-inset ring-amber-300' : ''} ${
-                isLast && !isSelected ? 'ring-2 ring-inset ring-sky-400/80' : ''
-              } ${isCheck ? 'bg-rose-600/75!' : ''}`}
+              } ${
+                isBlocked
+                  ? 'cell-blocked cursor-not-allowed'
+                  : draggableHere
+                    ? isDragOrigin
+                      ? 'cursor-grabbing'
+                      : 'cursor-grab'
+                    : 'cursor-pointer'
+              } ${isGlidingHere ? 'z-30' : isSelected ? 'z-10' : ''} ${
+                isSelected ? 'ring-3 ring-inset ring-amber-300' : ''
+              } ${
+                isPremoveSq && !isSelected
+                  ? 'ring-2 ring-inset ring-cyan-400 bg-cyan-500/25!'
+                  : isLast && !isSelected
+                    ? goldEffects?.goldLastMove
+                      ? 'ring-2 ring-inset ring-amber-400 shadow-[inset_0_0_12px_rgba(251,191,36,0.45)]'
+                      : 'ring-2 ring-inset ring-sky-400/80'
+                    : ''
+              } ${
+                isDragHover ? 'ring-2 ring-inset ring-sky-300 bg-sky-400/20!' : ''
+              } ${
+                isCheck
+                  ? goldEffects?.checkPulse
+                    ? 'bg-rose-600/80! ring-2 ring-inset ring-amber-300 animate-pulse'
+                    : 'bg-rose-600/75!'
+                  : ''
+              }`}
               aria-label={`Case ${String.fromCharCode(97 + (c % 26))}${rows - r}`}
             >
               {/* Special cell marker */}
@@ -296,23 +518,38 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 </span>
               )}
 
-              {/* Legal move dot / capture ring / power ring */}
+              {/* Legal move dot / capture ring / power ring / premove dot */}
               {isLegal && !renderSym && !isCapture && (
                 <span className="w-[28%] h-[28%] rounded-full bg-emerald-400/75 shadow-sm pointer-events-none" />
               )}
               {isCapture && (
-                <span className="absolute inset-[6%] rounded-full border-[3px] border-rose-500/85 pointer-events-none z-10" />
+                <span
+                  className={`absolute inset-[6%] rounded-full border-[3px] pointer-events-none z-10 ${
+                    goldEffects?.captureSparks
+                      ? 'border-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.75)]'
+                      : 'border-rose-500/85'
+                  }`}
+                />
               )}
               {isPower && !isCapture && (
-                <span className="absolute inset-[8%] rounded-full border-2 border-dashed border-violet-400/90 pointer-events-none z-10" />
+                <span
+                  className={`absolute inset-[8%] rounded-full border-2 border-dashed pointer-events-none z-10 ${
+                    goldEffects?.powerShimmer
+                      ? 'border-amber-300 shadow-[0_0_10px_rgba(251,191,36,0.65)]'
+                      : 'border-violet-400/90'
+                  }`}
+                />
+              )}
+              {isPremoveTarget && !isLegal && !isCapture && (
+                <span className="w-[28%] h-[28%] rounded-full bg-cyan-400/70 ring-2 ring-cyan-200/60 pointer-events-none z-10" />
               )}
 
-              {/* Piece glyph with smooth GPU glide on move */}
+              {/* Piece artwork with smooth GPU glide on move */}
               {renderSym && (
                 <span
-                  className={`piece-glyph piece-side-${renderSide} piece-tex-${pTex} w-full h-full flex items-center justify-center pointer-events-none ${
+                  className={`piece-tex-${pTex} w-[84%] h-[84%] flex items-center justify-center pointer-events-none select-none ${
                     isGlidingHere ? 'z-30' : 'z-10'
-                  } ${isInvisible ? 'opacity-45' : ''} ${
+                  } ${isDragOrigin ? 'opacity-20' : isInvisible ? 'opacity-45' : ''} ${
                     isFrozen ? 'ring-1 ring-cyan-300 rounded-full' : ''
                   }`}
                   style={{
@@ -325,7 +562,16 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                     willChange: isGlidingHere ? 'transform' : undefined,
                   }}
                 >
-                  {renderSym}
+                  <ChessPieceArtwork
+                    pieceId={renderPieceId}
+                    symbol={renderSym}
+                    side={renderSide}
+                    texture={pTex}
+                    lightColor={renderLight}
+                    darkColor={renderDark}
+                    mode="board"
+                    className="w-full h-full drop-shadow-[0_2px_3px_rgba(0,0,0,0.45)]"
+                  />
                 </span>
               )}
 
@@ -342,6 +588,32 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
           );
         })}
       </div>
+
+      {/* Floating GPU-composited drag ghost */}
+      {dragGhost && (
+        <div
+          className={`fixed left-0 top-0 pointer-events-none z-[90] piece-tex-${dragGhost.texture}`}
+          style={{
+            width: `${dragGhost.sizePx}px`,
+            height: `${dragGhost.sizePx}px`,
+            transform: `translate3d(${dragGhost.clientX - dragGhost.sizePx / 2}px, ${
+              dragGhost.clientY - dragGhost.sizePx / 2
+            }px, 0) scale(1.12)`,
+            willChange: 'transform',
+          }}
+        >
+          <ChessPieceArtwork
+            pieceId={dragGhost.pieceId}
+            symbol={dragGhost.symbol}
+            side={dragGhost.side}
+            texture={dragGhost.texture}
+            lightColor={dragGhost.lightColor}
+            darkColor={dragGhost.darkColor}
+            mode="board"
+            className="w-full h-full drop-shadow-[0_8px_16px_rgba(0,0,0,0.65)]"
+          />
+        </div>
+      )}
     </div>
   );
 };

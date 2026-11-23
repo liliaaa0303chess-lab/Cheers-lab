@@ -61,6 +61,39 @@
         "botRebellionUnlocked": {
           "type": "boolean"
         },
+        "goldCoins": {
+          "type": "integer"
+        },
+        "goldEffectIds": {
+          "type": "array"
+        },
+        "gold100Choice": {
+          "type": "string",
+          "enum": ["board_piece", "signature_mate"]
+        },
+        "gold1000Choice": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "customGoldTitle": {
+          "type": "string",
+          "maxLength": 48
+        },
+        "equippedTitle": {
+          "type": "string",
+          "maxLength": 48
+        },
+        "equippedStreakPiece": {
+          "type": "string",
+          "maxLength": 8
+        },
+        "battleCardStyle": {
+          "type": "string",
+          "enum": ["classic", "emerald", "crimson", "imperial", "cosmic"]
+        },
+        "showBattleIntro": {
+          "type": "boolean"
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time"
@@ -139,6 +172,500 @@
         "wins",
         "isPublic",
         "updatedAt"
+      ]
+    },
+    "PublicPlayerProfileDoc": {
+      "title": "PublicPlayerProfileDoc",
+      "description": "Public battle card, streak stats, titles, and presence for a player.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "nickname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "avatarColor": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 7,
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "avatarSymbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8
+        },
+        "eol": {
+          "type": "number"
+        },
+        "gamesPlayed": {
+          "type": "integer"
+        },
+        "wins": {
+          "type": "integer"
+        },
+        "loginStreak": {
+          "type": "integer"
+        },
+        "bestLoginStreak": {
+          "type": "integer"
+        },
+        "goldCoins": {
+          "type": "integer"
+        },
+        "unlockedTitles": {
+          "type": "array"
+        },
+        "equippedTitle": {
+          "type": "string",
+          "maxLength": 48
+        },
+        "streakPieceSymbol": {
+          "type": "string",
+          "maxLength": 8
+        },
+        "streakPieceLabel": {
+          "type": "string",
+          "maxLength": 48
+        },
+        "battleCardStyle": {
+          "type": "string",
+          "enum": ["classic", "emerald", "crimson", "imperial", "cosmic"]
+        },
+        "isOnline": {
+          "type": "boolean"
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "nickname",
+        "avatarColor",
+        "avatarSymbol",
+        "eol",
+        "gamesPlayed",
+        "wins",
+        "loginStreak",
+        "bestLoginStreak",
+        "goldCoins",
+        "unlockedTitles",
+        "isOnline",
+        "isPublic",
+        "lastSeenAt",
+        "updatedAt"
+      ]
+    },
+    "PublicPieceDoc": {
+      "title": "PublicPieceDoc",
+      "description": "Custom chess piece with public/private visibility owned by a user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["private", "public"]
+        },
+        "moves": {
+          "type": "object"
+        },
+        "customMoves": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "powerType": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "powers": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "conditions": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "limits": {
+          "type": "integer"
+        },
+        "limitsText": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "texture": {
+          "type": "string",
+          "enum": ["plain", "wood", "stone", "marble", "metal"]
+        },
+        "light": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "dark": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "creatorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "symbol",
+        "visibility",
+        "moves",
+        "customMoves",
+        "powerType",
+        "powers",
+        "conditions",
+        "limits",
+        "limitsText",
+        "texture",
+        "light",
+        "dark",
+        "description",
+        "creatorUid",
+        "creator",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PublicBoardDoc": {
+      "title": "PublicBoardDoc",
+      "description": "Custom chess board with public/private visibility owned by a user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "visibility": {
+          "type": "string",
+          "enum": ["private", "public"]
+        },
+        "rows": {
+          "type": "integer"
+        },
+        "cols": {
+          "type": "integer"
+        },
+        "cells": {
+          "type": "array"
+        },
+        "blocked": {
+          "type": "array"
+        },
+        "special": {
+          "type": "array"
+        },
+        "specialEffectType": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "specialEffect": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "texture": {
+          "type": "string",
+          "enum": ["plain", "wood", "stone", "marble", "metal", "night", "gold_night"]
+        },
+        "light": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "dark": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "rotation": {
+          "type": "number"
+        },
+        "creatorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "creator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "visibility",
+        "rows",
+        "cols",
+        "cells",
+        "blocked",
+        "special",
+        "specialEffect",
+        "texture",
+        "light",
+        "dark",
+        "rotation",
+        "creatorUid",
+        "creator",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "FriendRequestDoc": {
+      "title": "FriendRequestDoc",
+      "description": "Pending friend request between two Chess Lab players.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fromUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fromNickname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "fromAvatarColor": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "fromAvatarSymbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8
+        },
+        "fromEol": {
+          "type": "number"
+        },
+        "fromTitle": {
+          "type": "string",
+          "maxLength": 48
+        },
+        "fromStreakPieceSymbol": {
+          "type": "string",
+          "maxLength": 8
+        },
+        "fromBattleCardStyle": {
+          "type": "string",
+          "enum": ["classic", "emerald", "crimson", "imperial", "cosmic"]
+        },
+        "toUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "fromUid",
+        "fromNickname",
+        "fromAvatarColor",
+        "fromAvatarSymbol",
+        "fromEol",
+        "toUid",
+        "status",
+        "createdAt"
+      ]
+    },
+    "FriendshipDoc": {
+      "title": "FriendshipDoc",
+      "description": "Mutual friendship record storing both member UIDs and summary battle cards.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 260
+        },
+        "uidA": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "uidB": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "members": {
+          "type": "array"
+        },
+        "profiles": {
+          "type": "object"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "uidA",
+        "uidB",
+        "members",
+        "profiles",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "GameInviteDoc": {
+      "title": "GameInviteDoc",
+      "description": "Direct rematch/friend game invite sent to another player.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fromUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "fromNickname": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "fromAvatarColor": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "fromAvatarSymbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8
+        },
+        "fromEol": {
+          "type": "number"
+        },
+        "toUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "variantId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "variantName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "roomCode": {
+          "type": "string",
+          "maxLength": 24
+        },
+        "roomId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "fromUid",
+        "fromNickname",
+        "fromAvatarColor",
+        "fromAvatarSymbol",
+        "fromEol",
+        "toUid",
+        "variantName",
+        "createdAt"
       ]
     },
     "VariantDoc": {
@@ -414,6 +941,10 @@
           "minLength": 1,
           "maxLength": 48
         },
+        "opponentUid": {
+          "type": "string",
+          "maxLength": 128
+        },
         "result": {
           "type": "string",
           "enum": ["win", "loss", "draw", "saved"]
@@ -460,6 +991,42 @@
         "$ref": "#/entities/LeaderboardEntry"
       },
       "description": "Public leaderboard cards without PII."
+    },
+    "/publicProfiles/{userId}": {
+      "schema": {
+        "$ref": "#/entities/PublicPlayerProfileDoc"
+      },
+      "description": "Public Battle Card, unlocked titles, streak stats, and online presence without PII."
+    },
+    "/publicPieces/{pieceId}": {
+      "schema": {
+        "$ref": "#/entities/PublicPieceDoc"
+      },
+      "description": "Custom pieces with private/public visibility controls."
+    },
+    "/publicBoards/{boardId}": {
+      "schema": {
+        "$ref": "#/entities/PublicBoardDoc"
+      },
+      "description": "Custom boards with private/public visibility controls."
+    },
+    "/friendRequests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/FriendRequestDoc"
+      },
+      "description": "Pending friend requests readable/deletable by sender and recipient."
+    },
+    "/friendships/{pairId}": {
+      "schema": {
+        "$ref": "#/entities/FriendshipDoc"
+      },
+      "description": "Mutual friendships between two authenticated players."
+    },
+    "/gameInvites/{inviteId}": {
+      "schema": {
+        "$ref": "#/entities/GameInviteDoc"
+      },
+      "description": "Direct friend game invites."
     },
     "/variants/{variantId}": {
       "schema": {

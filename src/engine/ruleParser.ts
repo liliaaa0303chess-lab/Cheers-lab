@@ -83,6 +83,23 @@ export interface CompiledVariantRules {
   teams: PlayerSide[][];
   teamSharedElimination: boolean;
   allowTeammateCapture: boolean;
+  allowPieceDrops: boolean;
+  pieceEvolutionOnCaptures: {
+    filter: string;
+    threshold: number;
+    becomePieceId?: string;
+    grantPieceId?: string;
+    becomeImmobile?: boolean;
+    label: string;
+  }[];
+  timedRules: {
+    kind: 'unlock_backward_after' | 'enable_jump_after' | 'rotate_special_effect' | 'global_immobile_until';
+    turnThreshold: number;
+    interval?: number;
+    targetFilter?: string;
+    effectsCycle?: SpecialCellEffectType[];
+    label: string;
+  }[];
   hasAnyCustomEnforcement: boolean;
   activeRules: DetectedRuleBadge[];
   unrecognizedSentences: string[];
@@ -259,7 +276,7 @@ function detectColorsInSegment(seg: string): PlayerSide[] {
   if (
     /\b(?:dore(?:e)?s?|jaunes?|golds?)\b/.test(seg) ||
     /\b(?:pieces?|camp|equipe|joueur|pions?|cavaliers?|fous?|tours?|dames?|reines?|rois?)\s+or\b/.test(seg) ||
-    /\b(?:et|avec|,)\s+or\b/.test(seg)
+    /\b(?:et|avec|des|,)\s+or\b|\b(?:l['’]|les\s+)or\b/.test(seg)
   ) {
     colors.push('gold');
   }
@@ -898,6 +915,9 @@ export function compileVariantRules(
   let rawTeamGroups: PlayerSide[][] = [];
   let teamSharedElimination = Boolean(rc.teamSharedElimination);
   let allowTeammateCapture = false;
+  let allowPieceDrops = Boolean(rc.allowPieceDrops);
+  const pieceEvolutionOnCaptures: CompiledVariantRules['pieceEvolutionOnCaptures'] = [];
+  const timedRules: CompiledVariantRules['timedRules'] = [];
 
   if (rc.teamAssignments) {
     const byNum = new Map<number, PlayerSide[]>();
@@ -1023,6 +1043,13 @@ export function compileVariantRules(
   }
   if ((rc.maxStepsPerMove || 0) > 0) {
     activeRules.push({ label: `Portée max globale : ${rc.maxStepsPerMove} case(s)`, source: 'structured', category: 'movement' });
+  }
+  if (rc.allowPieceDrops) {
+    activeRules.push({
+      label: 'Parachutage : reposer les pièces capturées sur le plateau',
+      source: 'structured',
+      category: 'general',
+    });
   }
   for (const cr of rc.captureRestrictions || []) {
     activeRules.push({
@@ -1526,12 +1553,167 @@ export function compileVariantRules(
       });
     }
 
-    const promoOnCapMatch = mainClause.match(
-      /\b(?:qui\s+(?:capture|mange)|apres\s+(?:avoir\s+)?(?:capture|mange)|quand[^.]*(?:capture|mange))[^.]*\b(?:devient|se\s+transforme\s+en)\s+(?:une?\s+)?(.+)$/
+    // 3a. Parachutage / réutilisation des pièces capturées (Crazyhouse / Shogi)
+    if (
+      /\b(?:parachutage|parachuter|crazyhouse|shogi)\b/.test(clean) ||
+      /\b(?:reposer|replacer|rejouer|deposer|remettre)\s+(?:les\s+|des\s+|une\s+)?pieces?\s+(?:capturee?s?|prise?s?|mangee?s?)\b/.test(
+        clean
+      ) ||
+      /\bpieces?\s+(?:capturee?s?|prise?s?|mangee?s?)\s+(?:peut|peuvent)\s+etre\s+(?:reposee?s?|replacee?s?|rejouee?s?|parachutee?s?|remise?s?)\b/.test(
+        clean
+      )
+    ) {
+      sentenceMatched = true;
+      if (!allowPieceDrops) {
+        allowPieceDrops = true;
+        activeRules.push({
+          label: 'Parachutage : les pièces capturées peuvent être reposées sur le plateau',
+          source: 'text',
+          category: 'general',
+        });
+      }
+    }
+
+    // 3b. Dynamic / conditional rules: capture-threshold evolution & turn-based / periodic triggers
+    const rotateSpecialMatch =
+      clean.match(
+        /(?:tous\s+les|chaque)\s+(\d+|deux|trois|quatre|cinq|six|huit|dix)\s+tours?[^.]*cases?\s+speciales?[^.]*(?:changent?|tournent?|alternent?|varient?)/
+      ) ||
+      clean.match(
+        /cases?\s+speciales?[^.]*(?:changent?|tournent?|alternent?|varient?)[^.]*(?:tous\s+les|chaque)\s+(\d+|deux|trois|quatre|cinq|six|huit|dix)\s+tours?/
+      );
+    if (rotateSpecialMatch) {
+      const interval = Math.max(1, parseFrenchNumber(rotateSpecialMatch[1]) || 3);
+      sentenceMatched = true;
+      const cycle: SpecialCellEffectType[] = ['teleport', 'shield', 'double_action', 'freeze', 'trap'];
+      const label = `Cases spéciales ✦ dynamiques : changent d’effet tous les ${interval} tour(s)`;
+      timedRules.push({
+        kind: 'rotate_special_effect',
+        turnThreshold: interval,
+        interval,
+        effectsCycle: cycle,
+        label,
+      });
+      activeRules.push({ label, source: 'text', category: 'special' });
+    }
+
+    const afterTurnMatch = clean.match(
+      /(?:a\s+partir\s+du|apres\s+le|des\s+le|au\s+bout\s+de)\s+(\d+|deux|trois|quatre|cinq|six|sept|huit|dix|douze|quinze|vingt)e?\s+tours?\b/
     );
+    if (afterTurnMatch) {
+      const turnN = parseFrenchNumber(afterTurnMatch[1]);
+      if (turnN && turnN > 1) {
+        if (/\b(?:reculer|recule|reculent|en\s+arriere)\b/.test(clean) && !isProhibitive) {
+          sentenceMatched = true;
+          const refs = extractPieceRefs(clean, keywordMap);
+          const filter = refs.length > 0 ? refs[0] : 'all';
+          const label = `À partir du ${turnN}e tour : ${getPieceFilterLabel(filter, allCustomPieces)} peut reculer`;
+          timedRules.push({ kind: 'unlock_backward_after', turnThreshold: turnN, targetFilter: filter, label });
+          activeRules.push({ label, source: 'text', category: 'movement' });
+        } else if (/\b(?:sauter|par-dessus)\b/.test(clean) && !isProhibitive) {
+          sentenceMatched = true;
+          const refs = extractPieceRefs(clean, keywordMap);
+          const filter = refs.length > 0 ? refs[0] : 'all';
+          const label = `À partir du ${turnN}e tour : ${getPieceFilterLabel(filter, allCustomPieces)} peut sauter`;
+          timedRules.push({ kind: 'enable_jump_after', turnThreshold: turnN, targetFilter: filter, label });
+          activeRules.push({ label, source: 'text', category: 'movement' });
+        }
+      }
+    }
+
+    const immobileUntilMatch = clean.match(
+      /^(.*?)\b(?:ne\s+(?:peut|peuvent)\s+pas\s+(?:bouger|se\s+deplacer)|immobiles?)\s+(?:avant\s+le|pendant\s+les?)\s+(\d+|deux|trois|quatre|cinq|six|huit|dix)e?\s+tours?\b/
+    );
+    if (immobileUntilMatch) {
+      const n = parseFrenchNumber(immobileUntilMatch[2]);
+      if (n && n > 1) {
+        sentenceMatched = true;
+        const refs = extractPieceRefs(immobileUntilMatch[1], keywordMap);
+        const filter = refs.length > 0 ? refs[0] : 'all';
+        const label = `${getPieceFilterLabel(filter, allCustomPieces)} immobile avant le ${n}e tour`;
+        timedRules.push({ kind: 'global_immobile_until', turnThreshold: n, targetFilter: filter, label });
+        activeRules.push({ label, source: 'text', category: 'movement' });
+      }
+    }
+
+    const capThresholdMatch =
+      mainClause.match(
+        /(?:apres|au\s+bout\s+de|des)\s+(\d+|un|une|premier|premiere|deux|trois|quatre|cinq|six)\s+captures?(?:\s+d'une\s+piece)?[, ]+(.*)$/
+      ) ||
+      mainClause.match(
+        /^(.*?)\bqui\s+(?:fait|effectue|realise|capture|mange)\s+(\d+|un|une|deux|trois|quatre|cinq|six)\s+(?:captures?|pieces?)[, ]+(.*)$/
+      );
+    const isVictoryCapRule = /\b(?:on\s+gagne|gagne\s+la\s+partie|remporte|victoire)\b/.test(clean);
+    if (capThresholdMatch && !isVictoryCapRule) {
+      const isSecondForm = capThresholdMatch.length >= 4;
+      const thresholdNum = parseFrenchNumber(isSecondForm ? capThresholdMatch[2] : capThresholdMatch[1]);
+      const subjectText = isSecondForm ? capThresholdMatch[1] : capThresholdMatch[2];
+      const effectText = isSecondForm ? capThresholdMatch[3] : capThresholdMatch[2];
+      if (thresholdNum && thresholdNum >= 1) {
+        const subjRefs = extractPieceRefs(
+          isSecondForm ? subjectText : effectText.split(/\b(?:devient|se\s+transforme|gagne|immobile)\b/)[0],
+          keywordMap
+        );
+        const targetFilters = subjRefs.length > 0 ? subjRefs : ['all'];
+
+        if (/\b(?:devient\s+immobile|est\s+immobile|ne\s+peut\s+plus\s+bouger)\b/.test(effectText)) {
+          sentenceMatched = true;
+          for (const tf of targetFilters) {
+            const label = `Après ${thresholdNum} capture(s), ${getPieceFilterLabel(tf, allCustomPieces)} devient immobile`;
+            pieceEvolutionOnCaptures.push({
+              filter: tf,
+              threshold: thresholdNum,
+              becomeImmobile: true,
+              label,
+            });
+            activeRules.push({ label, source: 'text', category: 'capture' });
+          }
+        } else if (/\bgagne\b/.test(effectText)) {
+          const rightOfGain = effectText.split(/\bgagne\b/)[1] || '';
+          const grantedRefs = extractPieceRefs(rightOfGain, keywordMap);
+          const grantId = grantedRefs.find((r) => r !== 'all' && r !== 'custom' && r !== 'builtin');
+          if (grantId) {
+            sentenceMatched = true;
+            for (const tf of targetFilters) {
+              const label = `Après ${thresholdNum} capture(s), ${getPieceFilterLabel(tf, allCustomPieces)} gagne les mouvements : ${getPieceFilterLabel(grantId, allCustomPieces)}`;
+              pieceEvolutionOnCaptures.push({
+                filter: tf,
+                threshold: thresholdNum,
+                grantPieceId: grantId,
+                label,
+              });
+              activeRules.push({ label, source: 'text', category: 'capture' });
+            }
+          }
+        } else if (/\b(?:devient|se\s+transforme\s+en)\b/.test(effectText)) {
+          const rightOfBecome = effectText.split(/\b(?:devient|se\s+transforme\s+en)\b/)[1] || '';
+          const becomeRefs = extractPieceRefs(rightOfBecome, keywordMap);
+          const becomeId = becomeRefs.find((r) => r !== 'all' && r !== 'custom' && r !== 'builtin');
+          if (becomeId) {
+            sentenceMatched = true;
+            for (const tf of targetFilters) {
+              const label = `Après ${thresholdNum} capture(s), ${getPieceFilterLabel(tf, allCustomPieces)} devient ${getPieceFilterLabel(becomeId, allCustomPieces)}`;
+              pieceEvolutionOnCaptures.push({
+                filter: tf,
+                threshold: thresholdNum,
+                becomePieceId: becomeId,
+                label,
+              });
+              activeRules.push({ label, source: 'text', category: 'capture' });
+            }
+          }
+        }
+      }
+    }
+
+    const promoOnCapMatch = !sentenceMatched
+      ? mainClause.match(
+          /\b(?:qui\s+(?:capture|mange)|apres\s+(?:avoir\s+)?(?:capture|mange)|quand[^.]*(?:capture|mange))[^.]*\b(?:devient|se\s+transforme\s+en)\s+(?:une?\s+)?(.+)$/
+        )
+      : null;
     if (
       promoOnCapMatch ||
-      /\btransformation\s+en\s+\w+\s+apres\s+capture\b/.test(mainClause)
+      (!sentenceMatched && /\btransformation\s+en\s+\w+\s+apres\s+capture\b/.test(mainClause))
     ) {
       sentenceMatched = true;
       const beforePart = promoOnCapMatch ? mainClause.split(/\b(?:devient|se\s+transforme)\b/)[0] : mainClause;
@@ -2086,7 +2268,7 @@ export function compileVariantRules(
       }
     }
     if (
-      /(?:\bpas\s+de\s+promotion|\bpromotion\s+interdite|\baucune\s+promotion|\bsans\s+promotion|\bpions?\s+ne\s+(?:se\s+)?promeuvent\s+pas|\bpions?\s+ne\s+se\s+transforment?\s+pas)/.test(
+      /(?:\bpas\s+de\s+promotion|\bpromotion(?:\s+des\s+pions)?\s+interdite|\baucune\s+promotion|\bsans\s+promotion|\bpions?\s+ne\s+(?:se\s+)?promeuvent\s+pas|\bpions?\s+ne\s+se\s+transforment?\s+pas)/.test(
         clean
       )
     ) {
@@ -2282,10 +2464,13 @@ export function compileVariantRules(
     }
 
     const capTargetMatch = mainClause.match(
-      /(?:gagner\s+(?:avec|en\s+capturant|en\s+mangeant)|capturer|manger)\s+(\d+|deux|trois|quatre|cinq|six|sept|huit|dix)\s+pieces?/
+      /(?:gagner\s+(?:avec|en\s+capturant|en\s+mangeant)|(?:apres|avec)\s+(?:\d+|deux|trois|quatre|cinq|six|sept|huit|dix)\s+captures?[^.]*(?:gagne|victoire)|(?:capturer|manger)\s+(\d+|deux|trois|quatre|cinq|six|sept|huit|dix)\s+pieces?)/
     );
-    if (capTargetMatch) {
-      const n = parseFrenchNumber(capTargetMatch[1]);
+    const capTargetNumMatch = mainClause.match(
+      /(?:gagner\s+(?:avec|en\s+capturant|en\s+mangeant)|(?:apres|avec)|(?:capturer|manger))\s+(\d+|deux|trois|quatre|cinq|six|sept|huit|dix)\s+(?:pieces?|captures?)/
+    );
+    if (capTargetMatch && capTargetNumMatch) {
+      const n = parseFrenchNumber(capTargetNumMatch[1]);
       if (n && n >= 1) {
         sentenceMatched = true;
         captureTargetOverride = n;
@@ -2546,6 +2731,10 @@ export function compileVariantRules(
     specialWinPieces.size > 0 ||
     effectiveSpecialEffect !== 'none' ||
     turnOrderParsed.isCustom ||
+    teamSharedElimination ||
+    allowPieceDrops ||
+    pieceEvolutionOnCaptures.length > 0 ||
+    timedRules.length > 0 ||
     teams.length > 0 ||
     unrecognizedSentences.length > 0;
 
@@ -2616,10 +2805,26 @@ export function compileVariantRules(
     teams,
     teamSharedElimination,
     allowTeammateCapture,
+    allowPieceDrops,
+    pieceEvolutionOnCaptures,
+    timedRules,
     hasAnyCustomEnforcement,
     activeRules,
     unrecognizedSentences,
   };
+}
+
+export function resolveDynamicSpecialEffect(
+  compiled: CompiledVariantRules,
+  fullMoveNumber: number
+): SpecialCellEffectType {
+  const rot = compiled.timedRules?.find((t) => t.kind === 'rotate_special_effect');
+  if (rot && rot.effectsCycle && rot.effectsCycle.length > 0) {
+    const interval = Math.max(1, rot.interval || rot.turnThreshold || 3);
+    const phaseIdx = Math.floor(Math.max(0, fullMoveNumber - 1) / interval) % rot.effectsCycle.length;
+    return rot.effectsCycle[phaseIdx];
+  }
+  return compiled.effectiveSpecialEffect;
 }
 
 export function formatCaptureRestrictionLabel(

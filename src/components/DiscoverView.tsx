@@ -15,6 +15,7 @@ import type { User } from '../firebase';
 import {
   AI_LEVELS,
   getClosestAiLevelForEol,
+  type BattleCardStyle,
   type OnlineAiSeat,
   type OnlineHumanSeat,
   type PieceDef,
@@ -22,6 +23,7 @@ import {
   type Profile,
   type Variant,
 } from '../types/chess';
+import { getBattleCardFromProfile } from './BattleCard';
 import {
   addCommentToFirestore,
   fetchPublicVariantsFromFirestore,
@@ -51,6 +53,12 @@ interface DiscoverViewProps {
       userId: string;
       nickname: string;
       eol: number;
+      avatarColor?: string;
+      avatarSymbol?: string;
+      title?: string;
+      streakPieceSymbol?: string;
+      streakPieceLabel?: string;
+      battleCardStyle?: BattleCardStyle;
       theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
     };
     participants?: OnlineHumanSeat[];
@@ -265,6 +273,7 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
             competitive,
             variantId: randomMode ? null : v.id,
             variantSnapshot: v,
+            card: getBattleCardFromProfile(profile, true),
           })
         );
       };
@@ -285,6 +294,12 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
                 userId: string;
                 nickname: string;
                 eol: number;
+                avatarColor?: string;
+                avatarSymbol?: string;
+                title?: string;
+                streakPieceSymbol?: string;
+                streakPieceLabel?: string;
+                battleCardStyle?: BattleCardStyle;
                 theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
               },
               participants: Array.isArray(msg.participants)

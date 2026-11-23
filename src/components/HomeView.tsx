@@ -11,6 +11,7 @@ import {
 import { getPlayerLevel } from '../engine/eol';
 import type { Profile, Variant } from '../types/chess';
 import { getStreakRank } from '../utils/streaks';
+import { ChessPieceArtwork } from './ChessPieceArtwork';
 
 export type ScreenId =
   | 'home'
@@ -112,10 +113,14 @@ export const HomeView: React.FC<HomeViewProps> = ({
               className="flex items-center gap-3 px-3.5 py-2.5 sm:px-4 sm:py-3 rounded-xl border border-slate-200 dark:border-slate-700/80 bg-slate-50 dark:bg-[#1b2433] hover:border-sky-400/60 transition-colors text-left shrink-0 min-h-[44px]"
             >
               <span
-                className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center text-lg sm:text-xl font-bold text-slate-950 shrink-0"
+                className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex items-center justify-center p-1.5 shrink-0 shadow-sm border border-white/15"
                 style={{ backgroundColor: profile.avatarColor || '#7ebcff' }}
               >
-                {profile.avatarSymbol || '♔'}
+                <ChessPieceArtwork
+                  symbol={profile.avatarSymbol || '♔'}
+                  mode="emblem"
+                  bgColor={profile.avatarColor || '#7ebcff'}
+                />
               </span>
               <div>
                 <div className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
@@ -136,7 +141,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   title="Série de connexions quotidiennes — Promotion d’échiquier"
                   className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors ${streakRank.bgClass} ${streakRank.borderClass} ${streakRank.colorClass} hover:brightness-110`}
                 >
-                  <span className="text-sm leading-none">{streakRank.symbol}</span>
+                  <span className="w-4 h-4 shrink-0 flex items-center justify-center">
+                    <ChessPieceArtwork symbol={streakRank.symbol} side="gold" mode="board" />
+                  </span>
                   <span className="font-mono-num">{streak} j</span>
                   <span className="text-slate-600 dark:text-slate-300 font-medium">
                     · {streakRank.title}
@@ -149,7 +156,9 @@ export const HomeView: React.FC<HomeViewProps> = ({
                     title="La Grève des 8 Bots"
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 text-xs font-semibold text-amber-300 hover:bg-amber-500/15 transition-colors"
                   >
-                    <span className="text-sm leading-none">🦄</span>
+                    <span className="w-4 h-4 shrink-0 flex items-center justify-center">
+                      <ChessPieceArtwork symbol="🦄" side="gold" mode="board" />
+                    </span>
                     <span>La Grève des 8 Bots</span>
                   </button>
                 )}

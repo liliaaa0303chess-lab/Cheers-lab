@@ -9,13 +9,16 @@ import {
   Settings,
   X,
 } from 'lucide-react';
+import { BattleIntroOverlay, getBattleCardFromProfile } from './components/BattleCard';
 import { BotRebellionModal } from './components/BotRebellionModal';
+import { ChessPieceArtwork } from './components/ChessPieceArtwork';
 import { GamePlay } from './components/GamePlay';
 import { DiscoverView } from './components/DiscoverView';
 import { HistoryView } from './components/HistoryView';
 import { HomeView, type ScreenId } from './components/HomeView';
 import { LibraryView } from './components/LibraryView';
 import { PieceCreator } from './components/PieceCreator';
+import { PlayerProfileModal } from './components/PlayerProfileModal';
 import { SettingsView } from './components/SettingsView';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -39,7 +42,12 @@ import {
 import type {
   AppSettings,
   AppState,
+  AssetVisibility,
+  BattleCardData,
   BoardConfig,
+  FriendEntry,
+  FriendRequestEntry,
+  GameInviteEntry,
   GameMode,
   GameRecord,
   OnlineAiSeat,
@@ -47,19 +55,32 @@ import type {
   PieceDef,
   PlayerSide,
   Profile,
+  PublicPlayerProfile,
   SavedTheme,
   Variant,
 } from './types/chess';
 import {
+  clearGameInviteFirestore,
   deleteVariantFromFirestore,
+  fetchFullPlayerProfileFirestore,
   fetchVariantByIdFromFirestore,
   incrementVariantGamesInFirestore,
   loadUserProfileFromFirestore,
   publishVariantToFirestore,
   rateVariantInFirestore,
   recordGameInFirestore,
+  removeFriendshipFirestore,
+  respondFriendRequestFirestore,
+  sendFriendRequestFirestore,
+  sendGameInviteFirestore,
+  subscribeFriendshipsFirestore,
+  subscribeIncomingFriendRequestsFirestore,
+  subscribeIncomingGameInvitesFirestore,
   subscribePublicVariantsFromFirestore,
+  syncPublicBoardToFirestore,
+  syncPublicPieceToFirestore,
   syncUserProfileToFirestore,
+  updatePresenceInFirestore,
 } from './utils/firestoreSync';
 import {
   clearSessionNav,
@@ -91,6 +112,11 @@ import {
   SECRET_REBELLION_PIECE,
   SECRET_REBELLION_VARIANT_ID,
 } from './utils/botChallenge';
+import {
+  getUnlockedTitlesForProfile,
+  GOLD_100_MYTHIC_PIECE,
+  STREAK_BONUS_PIECES,
+} from './utils/goldRewards';
 import { evaluateDailyStreak, getStreakRank } from './utils/streaks';
 import { safeUuid } from './utils/safeId';
 
@@ -124,8 +150,29 @@ export default function App() {
   const [challengeModalTab, setChallengeModalTab] = useState<'streak' | 'bots' | null>(null);
   const [showBotRebellionModal, setShowBotRebellionModal] = useState(false);
   const [dismissedInstallBanner, setDismissedInstallBanner] = useState(false);
+  const [incomingFriendRequests, setIncomingFriendRequests] = useState<FriendRequestEntry[]>([]);
+  const [sentFriendRequestUids, setSentFriendRequestUids] = useState<string[]>([]);
+  const [incomingGameInvites, setIncomingGameInvites] = useState<GameInviteEntry[]>([]);
+  const [onlineStatusByUid, setOnlineStatusByUid] = useState<Record<string, boolean>>({});
+  const [profileModalState, setProfileModalState] = useState<{
+    open: boolean;
+    loading: boolean;
+    player: PublicPlayerProfile | null;
+  }>({ open: false, loading: false, player: null });
+  const [previewBattleIntro, setPreviewBattleIntro] = useState<{
+    open: boolean;
+    opponent: BattleCardData;
+  } | null>(null);
+  const [pendingFriendInvite, setPendingFriendInvite] = useState<{
+    toUid: string;
+    toNickname: string;
+    variantId: string;
+    nonce: number;
+  } | null>(null);
+
   const stateRef = useRef(state);
   stateRef.current = state;
+  const presenceWsRef = useRef<WebSocket | null>(null);
   const {
     isInstallable: pwaInstallable,
     isInstalled: pwaInstalled,
@@ -169,6 +216,12 @@ export default function App() {
       userId: string;
       nickname: string;
       eol: number;
+      avatarColor?: string;
+      avatarSymbol?: string;
+      title?: string;
+      streakPieceSymbol?: string;
+      streakPieceLabel?: string;
+      battleCardStyle?: Profile['battleCardStyle'];
       theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
     };
     participants?: OnlineHumanSeat[];
@@ -238,7 +291,25 @@ export default function App() {
     root.style.setProperty('--accent-color', state.settings.accent || '#7ebcff');
   }, [state.settings.theme, state.settings.accent]);
 
-  // Daily chess streak evaluation + backfill of past 8-bot victories
+  const appendUnlockedBonusPieces = (pieces: PieceDef[], profile: Profile): PieceDef[] => {
+    let next = pieces;
+    const bestStreak = Math.max(profile.bestLoginStreak || 0, profile.loginStreak || 0);
+    for (const bonus of STREAK_BONUS_PIECES) {
+      if (bestStreak >= bonus.minDays && !next.some((p) => p.id === bonus.piece.id)) {
+        next = [bonus.piece, ...next];
+      }
+    }
+    if (
+      (profile.goldCoins || 0) >= 100 &&
+      profile.gold100Choice === 'board_piece' &&
+      !next.some((p) => p.id === GOLD_100_MYTHIC_PIECE.id)
+    ) {
+      next = [GOLD_100_MYTHIC_PIECE, ...next];
+    }
+    return next;
+  };
+
+  // Daily chess streak evaluation + backfill of past 8-bot victories + bonus piece grants
   useEffect(() => {
     const syncDailyProgress = () => {
       const current = stateRef.current;
@@ -255,19 +326,25 @@ export default function App() {
         ? { ...backfilledProfile, botRebellionUnlocked: true }
         : backfilledProfile;
 
+      const withStreakBonusPieces = appendUnlockedBonusPieces(current.pieces, finalProfile);
+      const piecesMissingBonus = withStreakBonusPieces.length !== current.pieces.length;
+
       const profileChanged =
         streakRes.changed ||
         shouldUnlockLoot ||
+        piecesMissingBonus ||
         JSON.stringify(finalProfile.botChallenges || {}) !==
           JSON.stringify(current.profile.botChallenges || {});
 
       if (profileChanged) {
         setState((prev) => {
-          const nextPieces =
+          let nextPieces = appendUnlockedBonusPieces(prev.pieces, finalProfile);
+          if (
             finalProfile.botRebellionUnlocked &&
-            !prev.pieces.some((p) => p.id === SECRET_REBELLION_PIECE.id)
-              ? [SECRET_REBELLION_PIECE, ...prev.pieces]
-              : prev.pieces;
+            !nextPieces.some((p) => p.id === SECRET_REBELLION_PIECE.id)
+          ) {
+            nextPieces = [SECRET_REBELLION_PIECE, ...nextPieces];
+          }
           const nextVariants =
             finalProfile.botRebellionUnlocked &&
             !prev.variants.some((v) => v.id === SECRET_REBELLION_VARIANT_ID)
@@ -285,7 +362,9 @@ export default function App() {
           notify(`Promotion quotidienne ! ${rank.symbol} ${rank.title} (${finalProfile.loginStreak} j)`);
         } else if (streakRes.incremented) {
           const rank = getStreakRank(finalProfile.loginStreak || 1).current;
-          notify(`Série d’échiquier : ${finalProfile.loginStreak} jours (${rank.symbol})`);
+          notify(
+            `Série d’échiquier : ${finalProfile.loginStreak} jours (${rank.symbol}) · +${streakRes.coinsEarned} Pièces d’or`
+          );
         }
         if (shouldUnlockLoot) {
           setShowBotRebellionModal(true);
@@ -300,6 +379,18 @@ export default function App() {
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [Boolean(state.profile.nickname)]);
+
+  // Ensure mythic 100-gold piece is automatically granted when player selects board_piece choice
+  useEffect(() => {
+    if ((state.profile.goldCoins || 0) >= 100 && state.profile.gold100Choice === 'board_piece') {
+      if (!state.pieces.some((p) => p.id === GOLD_100_MYTHIC_PIECE.id)) {
+        setState((prev) => ({
+          ...prev,
+          pieces: appendUnlockedBonusPieces(prev.pieces, prev.profile),
+        }));
+      }
+    }
+  }, [state.profile.goldCoins, state.profile.gold100Choice, state.pieces.length]);
 
   // Firebase Auth listener + redirect completion + cloud profile merge
   useEffect(() => {
@@ -343,6 +434,7 @@ export default function App() {
               );
               const mergedProfile: Profile = {
                 ...prev.profile,
+                id: user.uid,
                 nickname: prev.profile.nickname || remote.nickname || user.displayName || 'Joueur',
                 avatarColor: remote.avatarColor || prev.profile.avatarColor,
                 avatarSymbol: remote.avatarSymbol || prev.profile.avatarSymbol,
@@ -360,6 +452,15 @@ export default function App() {
                   (prev.profile.lastStreakDate || '') >= (remote.lastStreakDate || '')
                     ? prev.profile.lastStreakDate
                     : remote.lastStreakDate,
+                goldCoins: Math.max(prev.profile.goldCoins || 0, remote.goldCoins || 0),
+                goldEffectIds: prev.profile.goldEffectIds ?? remote.goldEffectIds,
+                gold100Choice: prev.profile.gold100Choice ?? remote.gold100Choice,
+                gold1000Choice: prev.profile.gold1000Choice ?? remote.gold1000Choice,
+                customGoldTitle: prev.profile.customGoldTitle ?? remote.customGoldTitle,
+                equippedTitle: prev.profile.equippedTitle ?? remote.equippedTitle,
+                equippedStreakPiece: prev.profile.equippedStreakPiece ?? remote.equippedStreakPiece,
+                battleCardStyle: prev.profile.battleCardStyle ?? remote.battleCardStyle ?? 'classic',
+                showBattleIntro: prev.profile.showBattleIntro ?? remote.showBattleIntro ?? true,
                 botChallenges: mergedChallenges,
                 botRebellionUnlocked: mergedUnlocked,
                 discoveredVariants: Array.from(
@@ -369,10 +470,13 @@ export default function App() {
                   ])
                 ),
               };
-              const nextPieces =
-                mergedUnlocked && !prev.pieces.some((p) => p.id === SECRET_REBELLION_PIECE.id)
-                  ? [SECRET_REBELLION_PIECE, ...prev.pieces]
-                  : prev.pieces;
+              let nextPieces = appendUnlockedBonusPieces(prev.pieces, mergedProfile);
+              if (
+                mergedUnlocked &&
+                !nextPieces.some((p) => p.id === SECRET_REBELLION_PIECE.id)
+              ) {
+                nextPieces = [SECRET_REBELLION_PIECE, ...nextPieces];
+              }
               const nextVariants =
                 mergedUnlocked &&
                 !prev.variants.some((v) => v.id === SECRET_REBELLION_VARIANT_ID)
@@ -385,8 +489,17 @@ export default function App() {
                 variants: nextVariants,
               };
             });
-          } else if (stateRef.current.profile.nickname) {
-            await syncUserProfileToFirestore(user, stateRef.current.profile);
+          } else {
+            setState((prev) => ({
+              ...prev,
+              profile: { ...prev.profile, id: user.uid },
+            }));
+            if (stateRef.current.profile.nickname) {
+              await syncUserProfileToFirestore(user, {
+                ...stateRef.current.profile,
+                id: user.uid,
+              });
+            }
           }
         } catch (err) {
           console.warn('Firestore profile sync skipped:', err);
@@ -395,6 +508,178 @@ export default function App() {
     });
     return () => unsub();
   }, []);
+
+  // Firestore real-time subscriptions for incoming friend requests, friends list, and game invites + presence heartbeat
+  useEffect(() => {
+    if (!firebaseUser || !firebaseUser.emailVerified) return;
+
+    void updatePresenceInFirestore(firebaseUser, true);
+    const heartbeat = window.setInterval(() => {
+      void updatePresenceInFirestore(firebaseUser, document.visibilityState === 'visible');
+    }, 60_000);
+
+    const onVis = () => {
+      void updatePresenceInFirestore(firebaseUser, document.visibilityState === 'visible');
+    };
+    const onUnload = () => {
+      void updatePresenceInFirestore(firebaseUser, false);
+    };
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('beforeunload', onUnload);
+
+    const unsubReqs = subscribeIncomingFriendRequestsFirestore(firebaseUser, (reqs) => {
+      setIncomingFriendRequests(reqs);
+    });
+    const unsubFriends = subscribeFriendshipsFirestore(firebaseUser, (cloudFriends) => {
+      setState((prev) => {
+        const localMap = new Map<string, FriendEntry>();
+        for (const f of prev.profile.friends || []) localMap.set(f.uid, f);
+        for (const cf of cloudFriends) localMap.set(cf.uid, cf);
+        const merged = Array.from(localMap.values());
+        return {
+          ...prev,
+          profile: {
+            ...prev.profile,
+            friends: merged,
+          },
+        };
+      });
+    });
+    const unsubInvites = subscribeIncomingGameInvitesFirestore(firebaseUser, (invites) => {
+      setIncomingGameInvites(invites);
+    });
+
+    return () => {
+      window.clearInterval(heartbeat);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('beforeunload', onUnload);
+      unsubReqs();
+      unsubFriends();
+      unsubInvites();
+    };
+  }, [firebaseUser?.uid, firebaseUser?.emailVerified]);
+
+  // Background WebSocket connection for instant online presence dot, friend requests & rematch invites
+  useEffect(() => {
+    if (!state.profile.nickname || !state.profile.id) return;
+    let active = true;
+    let reconnectTimer: number | null = null;
+    let queryTimer: number | null = null;
+
+    const queryFriendsPresence = (ws: WebSocket | null) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const ids = (stateRef.current.profile.friends || []).map((f) => f.uid);
+      if (ids.length > 0) {
+        ws.send(JSON.stringify({ type: 'presence:query', userIds: ids }));
+      }
+    };
+
+    const connect = () => {
+      if (!active) return;
+      try {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${proto}//${window.location.host}/ws`);
+        presenceWsRef.current = ws;
+
+        ws.onopen = () => {
+          ws.send(
+            JSON.stringify({
+              type: 'presence:hello',
+              userId: stateRef.current.profile.id,
+            })
+          );
+          queryFriendsPresence(ws);
+        };
+
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data) as Record<string, unknown>;
+            if (msg.type === 'presence:status' && msg.online && typeof msg.online === 'object') {
+              setOnlineStatusByUid((prev) => ({
+                ...prev,
+                ...(msg.online as Record<string, boolean>),
+              }));
+            } else if (msg.type === 'friend:request_received' && msg.request) {
+              const req = msg.request as FriendRequestEntry;
+              setIncomingFriendRequests((prev) =>
+                prev.some((r) => r.fromUid === req.fromUid) ? prev : [req, ...prev]
+              );
+              notify(`${req.fromNickname} vous demande en ami !`);
+            } else if (msg.type === 'friend:response_received') {
+              const fromUid = String(msg.fromUid || '');
+              setSentFriendRequestUids((prev) => prev.filter((id) => id !== fromUid));
+              if (msg.accepted && msg.friend) {
+                const friend = msg.friend as FriendEntry;
+                setState((prev) => {
+                  const existing = prev.profile.friends || [];
+                  if (existing.some((f) => f.uid === friend.uid)) return prev;
+                  return {
+                    ...prev,
+                    profile: {
+                      ...prev.profile,
+                      friends: [friend, ...existing],
+                    },
+                  };
+                });
+                notify(`${friend.nickname} a accepté votre demande d’ami !`);
+              }
+            } else if (msg.type === 'friend:game_invite_received' && msg.invite) {
+              const inv = msg.invite as GameInviteEntry;
+              setIncomingGameInvites((prev) =>
+                prev.some((i) => i.id === inv.id) ? prev : [inv, ...prev]
+              );
+              notify(`${inv.fromNickname} vous propose une partie (${inv.variantName}) !`);
+            }
+          } catch {
+            // ignore malformed socket frame
+          }
+        };
+
+        ws.onclose = () => {
+          if (presenceWsRef.current === ws) {
+            presenceWsRef.current = null;
+          }
+          if (active) {
+            reconnectTimer = window.setTimeout(connect, 5000);
+          }
+        };
+      } catch {
+        // ignore offline WS error
+      }
+    };
+
+    connect();
+    queryTimer = window.setInterval(() => {
+      queryFriendsPresence(presenceWsRef.current);
+    }, 15_000);
+
+    return () => {
+      active = false;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (queryTimer) window.clearInterval(queryTimer);
+      if (presenceWsRef.current) {
+        try {
+          presenceWsRef.current.close();
+        } catch {
+          // ignore
+        }
+        presenceWsRef.current = null;
+      }
+    };
+  }, [Boolean(state.profile.nickname), state.profile.id]);
+
+  // Query live online presence immediately when opening Library or History
+  useEffect(() => {
+    if (screen === 'library' || screen === 'history') {
+      const ws = presenceWsRef.current;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const ids = (state.profile.friends || []).map((f) => f.uid);
+        if (ids.length > 0) {
+          ws.send(JSON.stringify({ type: 'presence:query', userIds: ids }));
+        }
+      }
+    }
+  }, [screen, state.profile.friends?.length]);
 
   const mergePublicIntoList = (incoming: Variant[]) => {
     if (!incoming.length) return;
@@ -554,13 +839,94 @@ export default function App() {
     enterWithProfile(generateGuestNickname());
   };
 
-  const handleSaveVariant = async (variant: Variant) => {
-    if (variant.visibility !== 'private') {
+  const { publicVariantPieceIds, publicVariantBoardIds } = useMemo(() => {
+    const pieceIds = new Set<string>();
+    const boardIds = new Set<string>();
+    for (const v of state.variants) {
+      if (v.visibility === 'public') {
+        if (v.board?.id) boardIds.add(v.board.id);
+        for (const pid of v.pieces || []) {
+          if (pid && !pid.startsWith('builtin:')) pieceIds.add(pid);
+        }
+        for (const def of v.customPieceDefs || []) {
+          if (def.id) pieceIds.add(def.id);
+        }
+        for (const val of Object.values(v.setup || {})) {
+          const pid = String(val || '').split('|')[0];
+          if (pid && !pid.startsWith('builtin:')) pieceIds.add(pid);
+        }
+      }
+    }
+    return {
+      publicVariantPieceIds: Array.from(pieceIds),
+      publicVariantBoardIds: Array.from(boardIds),
+    };
+  }, [state.variants]);
+
+  const friendsWithOnlineStatus = useMemo<FriendEntry[]>(() => {
+    return (state.profile.friends || []).map((f) => ({
+      ...f,
+      isOnline: onlineStatusByUid[f.uid] ?? f.isOnline,
+    }));
+  }, [state.profile.friends, onlineStatusByUid]);
+
+  const collectVariantCustomPieceIds = (v: Variant): Set<string> => {
+    const ids = new Set<string>();
+    for (const pid of v.pieces || []) {
+      if (pid && !pid.startsWith('builtin:')) ids.add(pid);
+    }
+    for (const def of v.customPieceDefs || []) {
+      if (def.id) ids.add(def.id);
+    }
+    for (const val of Object.values(v.setup || {})) {
+      const pid = String(val || '').split('|')[0];
+      if (pid && !pid.startsWith('builtin:')) ids.add(pid);
+    }
+    return ids;
+  };
+
+  const enforcePublicVariantAssets = (
+    variant: Variant
+  ): {
+    normalizedVariant: Variant;
+    forcedBoardIds: Set<string>;
+    forcedPieceIds: Set<string>;
+  } => {
+    if (variant.visibility !== 'public') {
+      return {
+        normalizedVariant: variant,
+        forcedBoardIds: new Set<string>(),
+        forcedPieceIds: new Set<string>(),
+      };
+    }
+    const forcedBoardIds = new Set<string>();
+    if (variant.board?.id) forcedBoardIds.add(variant.board.id);
+    const forcedPieceIds = collectVariantCustomPieceIds(variant);
+
+    const normalizedVariant: Variant = {
+      ...variant,
+      board: {
+        ...variant.board,
+        visibility: 'public',
+      },
+      customPieceDefs: (variant.customPieceDefs || []).map((p) => ({
+        ...p,
+        visibility: 'public',
+      })),
+    };
+    return { normalizedVariant, forcedBoardIds, forcedPieceIds };
+  };
+
+  const handleSaveVariant = async (rawVariant: Variant) => {
+    if (rawVariant.visibility !== 'private') {
       const checks = [
-        validateFamilyFriendlyText(variant.name, { blockLinks: true, label: 'Le nom' }),
-        validateFamilyFriendlyText(variant.description || '', { blockLinks: true, label: 'La description' }),
-        validateFamilyFriendlyText(variant.rules || '', { blockLinks: true, label: 'Les règles' }),
-        validateFamilyFriendlyText(variant.goal || '', { blockLinks: true, label: 'L’objectif' }),
+        validateFamilyFriendlyText(rawVariant.name, { blockLinks: true, label: 'Le nom' }),
+        validateFamilyFriendlyText(rawVariant.description || '', {
+          blockLinks: true,
+          label: 'La description',
+        }),
+        validateFamilyFriendlyText(rawVariant.rules || '', { blockLinks: true, label: 'Les règles' }),
+        validateFamilyFriendlyText(rawVariant.goal || '', { blockLinks: true, label: 'L’objectif' }),
       ];
       const failed = checks.find((c) => !c.ok);
       if (failed) {
@@ -568,11 +934,42 @@ export default function App() {
         return;
       }
     }
+
+    const { normalizedVariant: variant, forcedBoardIds, forcedPieceIds } =
+      enforcePublicVariantAssets(rawVariant);
+
+    const updatedBoardsToSync: BoardConfig[] = [];
+    const updatedPiecesToSync: PieceDef[] = [];
+
     setState((prev) => {
       const exists = prev.variants.some((v) => v.id === variant.id);
       const nextVariants = exists
         ? prev.variants.map((v) => (v.id === variant.id ? variant : v))
         : [variant, ...prev.variants];
+
+      const nextBoards =
+        variant.visibility === 'public'
+          ? prev.boards.map((b) => {
+              if (b.id && forcedBoardIds.has(b.id)) {
+                const pubBoard: BoardConfig = { ...b, visibility: 'public' };
+                updatedBoardsToSync.push(pubBoard);
+                return pubBoard;
+              }
+              return b;
+            })
+          : prev.boards;
+
+      const nextPieces =
+        variant.visibility === 'public'
+          ? prev.pieces.map((p) => {
+              if (forcedPieceIds.has(p.id)) {
+                const pubPiece: PieceDef = { ...p, visibility: 'public' };
+                updatedPiecesToSync.push(pubPiece);
+                return pubPiece;
+              }
+              return p;
+            })
+          : prev.pieces;
 
       const nextHistory: GameRecord[] = exists
         ? prev.history
@@ -590,7 +987,13 @@ export default function App() {
             ...prev.history,
           ];
 
-      return { ...prev, variants: nextVariants, history: nextHistory };
+      return {
+        ...prev,
+        variants: nextVariants,
+        boards: nextBoards,
+        pieces: nextPieces,
+        history: nextHistory,
+      };
     });
 
     setSelectedPlayVariantId(variant.id);
@@ -603,6 +1006,21 @@ export default function App() {
     if (firebaseUser) {
       try {
         await publishVariantToFirestore(firebaseUser, variant);
+        if (variant.visibility === 'public') {
+          const creatorName = stateRef.current.profile.nickname || 'Créateur';
+          if (variant.board.id) {
+            void syncPublicBoardToFirestore(firebaseUser, variant.board, creatorName).catch(() => {});
+          }
+          for (const b of updatedBoardsToSync) {
+            void syncPublicBoardToFirestore(firebaseUser, b, creatorName).catch(() => {});
+          }
+          for (const cp of variant.customPieceDefs || []) {
+            void syncPublicPieceToFirestore(firebaseUser, cp, creatorName).catch(() => {});
+          }
+          for (const p of updatedPiecesToSync) {
+            void syncPublicPieceToFirestore(firebaseUser, p, creatorName).catch(() => {});
+          }
+        }
       } catch (err) {
         console.warn('Cloud variant publish warning:', err);
       }
@@ -610,8 +1028,8 @@ export default function App() {
     notify(
       variant.visibility === 'public'
         ? firebaseUser
-          ? 'Variante enregistrée et publiée sur le Cloud Firebase !'
-          : 'Variante enregistrée et publiée !'
+          ? 'Variante (et ses pièces/plateau publics) enregistrée et publiée sur Firebase !'
+          : 'Variante enregistrée et publiée (pièces & plateau rendus publics) !'
         : 'Variante enregistrée dans votre bibliothèque.'
     );
     setVariantDraft(createEmptyDraftVariant(state.profile));
@@ -643,7 +1061,6 @@ export default function App() {
         },
       ],
     };
-    // Import any custom piece definitions from the forked variant so user can edit/play them
     const missingPieces = (source.customPieceDefs || []).filter(
       (cp) => !state.pieces.some((p) => p.id === cp.id)
     );
@@ -657,7 +1074,12 @@ export default function App() {
     notify(`Variante dérivée créée depuis « ${source.name} ».`);
   };
 
-  const handleSavePiece = (piece: PieceDef) => {
+  const handleSavePiece = (rawPiece: PieceDef) => {
+    const mustBePublic = publicVariantPieceIds.includes(rawPiece.id);
+    const piece: PieceDef = mustBePublic
+      ? { ...rawPiece, visibility: 'public' }
+      : { ...rawPiece, visibility: rawPiece.visibility || 'private' };
+
     setState((prev) => {
       const exists = prev.pieces.some((p) => p.id === piece.id);
       const nextPieces = exists
@@ -665,6 +1087,39 @@ export default function App() {
         : [piece, ...prev.pieces];
       return { ...prev, pieces: nextPieces };
     });
+    if (firebaseUser) {
+      void syncPublicPieceToFirestore(
+        firebaseUser,
+        piece,
+        stateRef.current.profile.nickname || 'Créateur'
+      ).catch(() => {});
+    }
+  };
+
+  const handleTogglePieceVisibility = (piece: PieceDef, vis: AssetVisibility) => {
+    if (vis === 'private' && publicVariantPieceIds.includes(piece.id)) {
+      notify('Impossible : cette pièce est utilisée dans une variante publique.');
+      return;
+    }
+    const updated: PieceDef = { ...piece, visibility: vis };
+    setState((prev) => ({
+      ...prev,
+      pieces: prev.pieces.map((p) => (p.id === piece.id ? updated : p)),
+      variants: prev.variants.map((v) => ({
+        ...v,
+        customPieceDefs: (v.customPieceDefs || []).map((cp) =>
+          cp.id === piece.id ? { ...cp, visibility: vis } : cp
+        ),
+      })),
+    }));
+    if (firebaseUser) {
+      void syncPublicPieceToFirestore(
+        firebaseUser,
+        updated,
+        stateRef.current.profile.nickname || 'Créateur'
+      ).catch(() => {});
+    }
+    notify(`Pièce « ${piece.name} » passée en ${vis === 'public' ? 'publique' : 'privée'}.`);
   };
 
   const handleDeletePiece = (id: string) => {
@@ -680,9 +1135,355 @@ export default function App() {
       ...board,
       id: `brd_${safeUuid().slice(0, 8)}`,
       name,
+      visibility: board.visibility || 'private',
     };
     setState((prev) => ({ ...prev, boards: [saved, ...prev.boards] }));
+    if (firebaseUser && saved.visibility === 'public') {
+      void syncPublicBoardToFirestore(
+        firebaseUser,
+        saved,
+        stateRef.current.profile.nickname || 'Créateur'
+      ).catch(() => {});
+    }
     notify(`Plateau « ${name} » sauvegardé en bibliothèque.`);
+  };
+
+  const handleToggleBoardVisibility = (board: BoardConfig, vis: AssetVisibility) => {
+    if (vis === 'private' && board.id && publicVariantBoardIds.includes(board.id)) {
+      notify('Impossible : ce plateau est utilisé dans une variante publique.');
+      return;
+    }
+    const updated: BoardConfig = { ...board, visibility: vis };
+    setState((prev) => ({
+      ...prev,
+      boards: prev.boards.map((b) => (b.id === board.id ? updated : b)),
+    }));
+    if (firebaseUser) {
+      void syncPublicBoardToFirestore(
+        firebaseUser,
+        updated,
+        stateRef.current.profile.nickname || 'Créateur'
+      ).catch(() => {});
+    }
+    notify(
+      `Plateau « ${board.name || 'Sans nom'} » passé en ${vis === 'public' ? 'public' : 'privé'}.`
+    );
+  };
+
+  const handleOpenProfileByUid = async (
+    targetUid: string | undefined,
+    fallbackPlayer: PublicPlayerProfile
+  ) => {
+    const isSelf =
+      targetUid === state.profile.id || (firebaseUser ? targetUid === firebaseUser.uid : false);
+    if (isSelf) {
+      const card = getBattleCardFromProfile(state.profile, true);
+      const selfPublic: PublicPlayerProfile = {
+        ...card,
+        uid: state.profile.id,
+        gamesPlayed: state.profile.gamesPlayed,
+        wins: state.profile.wins,
+        loginStreak: state.profile.loginStreak || 1,
+        bestLoginStreak: state.profile.bestLoginStreak || state.profile.loginStreak || 1,
+        goldCoins: state.profile.goldCoins || 0,
+        unlockedTitles: getUnlockedTitlesForProfile(state.profile),
+        publicVariants: state.variants.filter((v) => v.visibility === 'public'),
+        publicPieces: state.pieces.filter((p) => p.visibility === 'public'),
+        publicBoards: state.boards.filter((b) => b.visibility === 'public'),
+      };
+      setProfileModalState({ open: true, loading: false, player: selfPublic });
+      return;
+    }
+
+    setProfileModalState({
+      open: true,
+      loading: Boolean(targetUid),
+      player: fallbackPlayer,
+    });
+
+    if (!targetUid) return;
+    const remote = await fetchFullPlayerProfileFirestore(targetUid).catch(() => null);
+    setProfileModalState((curr) => {
+      if (!curr.open) return curr;
+      if (!remote) return { ...curr, loading: false };
+      return {
+        open: true,
+        loading: false,
+        player: {
+          ...remote,
+          isOnline: onlineStatusByUid[targetUid] ?? remote.isOnline,
+        },
+      };
+    });
+  };
+
+  const handleOpenProfileFromRecord = (record: GameRecord) => {
+    const targetUid = record.opponentUid;
+    const fallback: PublicPlayerProfile = {
+      uid: targetUid || `opp_${record.id}`,
+      nickname: record.opponentName || 'Adversaire',
+      avatarColor: record.opponentAvatarColor || '#7ebcff',
+      avatarSymbol: record.opponentAvatarSymbol || '♔',
+      eol: record.opponentEol || 400,
+      gamesPlayed: 1,
+      wins: record.result === 'loss' ? 1 : 0,
+      title: record.opponentTitle,
+      streakPieceSymbol: record.opponentStreakPiece || '♙',
+      battleCardStyle: record.opponentBattleCardStyle || 'classic',
+      isOnline: targetUid ? Boolean(onlineStatusByUid[targetUid]) : false,
+      loginStreak: 1,
+      bestLoginStreak: 1,
+      goldCoins: 0,
+      unlockedTitles: record.opponentTitle ? [record.opponentTitle] : [],
+      publicVariants: publicVariants.filter((v) =>
+        targetUid ? v.creatorId === targetUid : v.creator === record.opponentName
+      ),
+      publicPieces: [],
+      publicBoards: [],
+    };
+    void handleOpenProfileByUid(targetUid, fallback);
+  };
+
+  const handleOpenFriendProfile = (uid: string, fallbackFriend?: FriendEntry) => {
+    const fallback: PublicPlayerProfile = {
+      uid,
+      nickname: fallbackFriend?.nickname || 'Ami',
+      avatarColor: fallbackFriend?.avatarColor || '#7ebcff',
+      avatarSymbol: fallbackFriend?.avatarSymbol || '♔',
+      eol: fallbackFriend?.eol || 400,
+      gamesPlayed: 0,
+      wins: 0,
+      title: fallbackFriend?.title,
+      streakPieceSymbol: fallbackFriend?.streakPieceSymbol || '♙',
+      streakPieceLabel: fallbackFriend?.streakPieceLabel,
+      battleCardStyle: fallbackFriend?.battleCardStyle || 'classic',
+      isOnline: onlineStatusByUid[uid] ?? Boolean(fallbackFriend?.isOnline),
+      loginStreak: 1,
+      bestLoginStreak: 1,
+      goldCoins: 0,
+      unlockedTitles: fallbackFriend?.title ? [fallbackFriend.title] : [],
+      publicVariants: publicVariants.filter((v) => v.creatorId === uid),
+      publicPieces: [],
+      publicBoards: [],
+    };
+    void handleOpenProfileByUid(uid, fallback);
+  };
+
+  const handleSendFriendRequest = async (
+    targetUid: string | undefined,
+    meta?: { nickname?: string }
+  ) => {
+    if (!targetUid) {
+      notify('Impossible d’envoyer une demande d’ami à un adversaire hors-ligne ou à une IA.');
+      return;
+    }
+    if (
+      targetUid === state.profile.id ||
+      (firebaseUser && targetUid === firebaseUser.uid)
+    ) {
+      return;
+    }
+    if (friendsWithOnlineStatus.some((f) => f.uid === targetUid)) {
+      notify(`${meta?.nickname || 'Ce joueur'} est déjà dans vos amis.`);
+      return;
+    }
+    if (sentFriendRequestUids.includes(targetUid)) {
+      notify('Demande d’ami déjà envoyée.');
+      return;
+    }
+
+    setSentFriendRequestUids((prev) => [...prev, targetUid]);
+
+    const myCard = getBattleCardFromProfile(state.profile, true);
+    const localReq: FriendRequestEntry = {
+      id: `fr_${state.profile.id.slice(0, 12)}_${targetUid.slice(0, 12)}`,
+      fromUid: state.profile.id,
+      fromNickname: myCard.nickname,
+      fromAvatarColor: myCard.avatarColor,
+      fromAvatarSymbol: myCard.avatarSymbol,
+      fromEol: myCard.eol,
+      fromTitle: myCard.title,
+      fromStreakPieceSymbol: myCard.streakPieceSymbol,
+      fromBattleCardStyle: myCard.battleCardStyle,
+      toUid: targetUid,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+
+    if (firebaseUser && firebaseUser.emailVerified) {
+      void sendFriendRequestFirestore(firebaseUser, state.profile, targetUid).catch(() => {});
+    }
+    if (presenceWsRef.current && presenceWsRef.current.readyState === WebSocket.OPEN) {
+      presenceWsRef.current.send(
+        JSON.stringify({
+          type: 'friend:request',
+          toUid: targetUid,
+          request: localReq,
+        })
+      );
+    }
+    notify(`Demande d’ami envoyée à ${meta?.nickname || 'ce joueur'} !`);
+  };
+
+  const handleRespondFriendRequest = async (req: FriendRequestEntry, accept: boolean) => {
+    setIncomingFriendRequests((prev) => prev.filter((r) => r.id !== req.id));
+
+    const myCard = getBattleCardFromProfile(state.profile, true);
+    const newFriendEntry: FriendEntry = {
+      uid: req.fromUid,
+      nickname: req.fromNickname,
+      avatarColor: req.fromAvatarColor,
+      avatarSymbol: req.fromAvatarSymbol,
+      eol: req.fromEol,
+      title: req.fromTitle,
+      streakPieceSymbol: req.fromStreakPieceSymbol,
+      battleCardStyle: req.fromBattleCardStyle,
+      isOnline: onlineStatusByUid[req.fromUid] ?? true,
+      addedAt: new Date().toISOString(),
+    };
+
+    if (accept) {
+      setState((prev) => {
+        const existing = prev.profile.friends || [];
+        if (existing.some((f) => f.uid === req.fromUid)) return prev;
+        return {
+          ...prev,
+          profile: {
+            ...prev.profile,
+            friends: [newFriendEntry, ...existing],
+          },
+        };
+      });
+      notify(`${req.fromNickname} fait maintenant partie de vos amis !`);
+    }
+
+    if (firebaseUser && firebaseUser.emailVerified) {
+      void respondFriendRequestFirestore(firebaseUser, state.profile, req, accept).catch(() => {});
+    }
+
+    if (presenceWsRef.current && presenceWsRef.current.readyState === WebSocket.OPEN) {
+      presenceWsRef.current.send(
+        JSON.stringify({
+          type: 'friend:response',
+          toUid: req.fromUid,
+          fromUid: state.profile.id,
+          accepted: accept,
+          friend: accept
+            ? {
+                uid: state.profile.id,
+                nickname: myCard.nickname,
+                avatarColor: myCard.avatarColor,
+                avatarSymbol: myCard.avatarSymbol,
+                eol: myCard.eol,
+                title: myCard.title,
+                streakPieceSymbol: myCard.streakPieceSymbol,
+                streakPieceLabel: myCard.streakPieceLabel,
+                battleCardStyle: myCard.battleCardStyle,
+                isOnline: true,
+                addedAt: new Date().toISOString(),
+              }
+            : undefined,
+        })
+      );
+    }
+  };
+
+  const handleRemoveFriend = (friendUid: string) => {
+    setState((prev) => ({
+      ...prev,
+      profile: {
+        ...prev.profile,
+        friends: (prev.profile.friends || []).filter((f) => f.uid !== friendUid),
+      },
+    }));
+    if (firebaseUser && firebaseUser.emailVerified) {
+      void removeFriendshipFirestore(firebaseUser, friendUid).catch(() => {});
+    }
+    notify('Ami retiré de votre liste.');
+  };
+
+  const handleChallengeFriend = (
+    target: { uid: string; nickname: string },
+    variant: Variant
+  ) => {
+
+    setState((prev) => ({
+      ...prev,
+      variants: prev.variants.some((v) => v.id === variant.id)
+        ? prev.variants
+        : [variant, ...prev.variants],
+    }));
+    setProfileModalState({ open: false, loading: false, player: null });
+    setSelectedPlayVariantId(variant.id);
+    setPlayInitialMode('online');
+    setPlayInitialCompetitive(true);
+    setMatchedOnlineRoom(null);
+    setInitialJoinRoomCode('');
+    setPendingFriendInvite({
+      toUid: target.uid,
+      toNickname: target.nickname,
+      variantId: variant.id,
+      nonce: Date.now(),
+    });
+    navigateToScreen('play');
+  };
+
+  const handleRoomCreatedForFriend = (
+    target: { toUid: string; toNickname: string },
+    roomCode: string,
+    variant: Variant
+  ) => {
+    const invite: GameInviteEntry = {
+      id: `inv_${safeUuid().slice(0, 10)}`,
+      fromUid: state.profile.id,
+      fromNickname: state.profile.nickname || 'Joueur',
+      fromAvatarColor: state.profile.avatarColor || '#7ebcff',
+      fromAvatarSymbol: state.profile.avatarSymbol || '♔',
+      fromEol: state.profile.eol || 400,
+      toUid: target.toUid,
+      variantId: variant.id,
+      variantName: variant.name,
+      roomCode,
+      createdAt: new Date().toISOString(),
+    };
+
+    if (firebaseUser && firebaseUser.emailVerified) {
+      void sendGameInviteFirestore(
+        firebaseUser,
+        state.profile,
+        target.toUid,
+        { id: variant.id, name: variant.name },
+        roomCode
+      ).catch(() => {});
+    }
+    if (presenceWsRef.current && presenceWsRef.current.readyState === WebSocket.OPEN) {
+      presenceWsRef.current.send(
+        JSON.stringify({
+          type: 'friend:invite_game',
+          toUid: target.toUid,
+          invite,
+        })
+      );
+    }
+    setPendingFriendInvite(null);
+    notify(`Invitation envoyée à ${target.toNickname} (code ${roomCode}) !`);
+  };
+
+  const handleRespondGameInvite = (inv: GameInviteEntry, join: boolean) => {
+    setIncomingGameInvites((prev) => prev.filter((i) => i.id !== inv.id));
+    if (firebaseUser && firebaseUser.emailVerified) {
+      void clearGameInviteFirestore(inv.id).catch(() => {});
+    }
+    if (!join || !inv.roomCode) return;
+
+    if (inv.variantId) {
+      const hasVar = allPlayableVariants.some((v) => v.id === inv.variantId);
+      if (hasVar) setSelectedPlayVariantId(inv.variantId);
+    }
+    setMatchedOnlineRoom(null);
+    setPlayInitialMode('online');
+    setInitialJoinRoomCode(inv.roomCode);
+    navigateToScreen('play');
   };
 
   const handleFinishGame = (record: GameRecord, updatedEol?: number) => {
@@ -956,13 +1757,24 @@ export default function App() {
                       key={sym}
                       type="button"
                       onClick={() => setOnboardingSymbol(sym)}
-                      className={`h-10 rounded-lg border text-lg flex items-center justify-center ${
+                      aria-label={`Choisir l’emblème ${sym}`}
+                      className={`h-10 rounded-lg border flex items-center justify-center p-1 transition-transform active:scale-95 ${
                         onboardingSymbol === sym
-                          ? 'border-sky-500 bg-sky-500/20'
+                          ? 'border-sky-500 bg-sky-500/20 ring-2 ring-sky-400/40'
                           : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f]'
                       }`}
                     >
-                      {sym}
+                      <span
+                        className="w-7 h-7 rounded-md flex items-center justify-center p-0.5"
+                        style={{ backgroundColor: onboardingColor }}
+                      >
+                        <ChessPieceArtwork
+                          symbol={sym}
+                          mode="emblem"
+                          bgColor={onboardingColor}
+                          className="w-5 h-5"
+                        />
+                      </span>
                     </button>
                   ))}
                 </div>
@@ -1141,6 +1953,10 @@ export default function App() {
             profile={state.profile}
             pieces={state.pieces}
             settings={state.settings}
+            canUseGoldNight={
+              (state.profile.goldCoins || 0) >= 100 &&
+              state.profile.gold100Choice === 'board_piece'
+            }
             draft={variantDraft}
             onChangeDraft={setVariantDraft}
             onSaveVariant={handleSaveVariant}
@@ -1169,6 +1985,7 @@ export default function App() {
         {screen === 'pieces' && (
           <PieceCreator
             pieces={state.pieces}
+            publicVariantPieceIds={publicVariantPieceIds}
             currentVariantBoard={variantDraft.board}
             currentVariant={variantDraft}
             settings={state.settings}
@@ -1250,8 +2067,11 @@ export default function App() {
             onClearOnlineRoom={() => {
               setMatchedOnlineRoom(null);
               setInitialJoinRoomCode('');
+              setPendingFriendInvite(null);
             }}
             onOpenChallenges={(tab = 'bots') => setChallengeModalTab(tab)}
+            pendingFriendInvite={pendingFriendInvite}
+            onRoomCreatedForFriend={handleRoomCreatedForFriend}
             onNotify={notify}
           />
         )}
@@ -1262,6 +2082,9 @@ export default function App() {
             boards={state.boards}
             pieces={state.pieces}
             savedThemes={state.settings.savedThemes || []}
+            friends={friendsWithOnlineStatus}
+            friendRequests={incomingFriendRequests}
+            onlineStatusByUid={onlineStatusByUid}
             onPlayVariant={(v) => {
               setSelectedPlayVariantId(v.id);
               setPlayInitialMode('ai');
@@ -1284,10 +2107,37 @@ export default function App() {
               notify('Variante supprimée.');
             }}
             onToggleVisibility={async (v, vis) => {
-              const updated = { ...v, visibility: vis };
+              const { normalizedVariant: updated, forcedBoardIds, forcedPieceIds } =
+                enforcePublicVariantAssets({ ...v, visibility: vis });
+
+              const syncedBoards: BoardConfig[] = [];
+              const syncedPieces: PieceDef[] = [];
+
               setState((prev) => ({
                 ...prev,
                 variants: prev.variants.map((x) => (x.id === v.id ? updated : x)),
+                boards:
+                  vis === 'public'
+                    ? prev.boards.map((b) => {
+                        if (b.id && forcedBoardIds.has(b.id)) {
+                          const pb: BoardConfig = { ...b, visibility: 'public' };
+                          syncedBoards.push(pb);
+                          return pb;
+                        }
+                        return b;
+                      })
+                    : prev.boards,
+                pieces:
+                  vis === 'public'
+                    ? prev.pieces.map((p) => {
+                        if (forcedPieceIds.has(p.id)) {
+                          const pp: PieceDef = { ...p, visibility: 'public' };
+                          syncedPieces.push(pp);
+                          return pp;
+                        }
+                        return p;
+                      })
+                    : prev.pieces,
               }));
               if (vis === 'public') {
                 mergePublicIntoList([updated]);
@@ -1299,8 +2149,27 @@ export default function App() {
               }
               if (firebaseUser) {
                 await publishVariantToFirestore(firebaseUser, updated).catch(() => {});
+                if (vis === 'public') {
+                  const creatorName = stateRef.current.profile.nickname || 'Créateur';
+                  if (updated.board.id) {
+                    void syncPublicBoardToFirestore(firebaseUser, updated.board, creatorName).catch(() => {});
+                  }
+                  for (const b of syncedBoards) {
+                    void syncPublicBoardToFirestore(firebaseUser, b, creatorName).catch(() => {});
+                  }
+                  for (const cp of updated.customPieceDefs || []) {
+                    void syncPublicPieceToFirestore(firebaseUser, cp, creatorName).catch(() => {});
+                  }
+                  for (const p of syncedPieces) {
+                    void syncPublicPieceToFirestore(firebaseUser, p, creatorName).catch(() => {});
+                  }
+                }
               }
-              notify(`Visibilité mise à jour : ${vis}.`);
+              notify(
+                vis === 'public'
+                  ? 'Variante publique : son plateau et ses pièces ont aussi été rendus publics.'
+                  : `Visibilité mise à jour : ${vis}.`
+              );
             }}
             onLoadBoardIntoCreator={(b) => {
               setVariantDraft((prev) => ({
@@ -1310,6 +2179,7 @@ export default function App() {
               setScreen('create');
               notify('Plateau chargé dans l’éditeur.');
             }}
+            onToggleBoardVisibility={handleToggleBoardVisibility}
             onDeleteBoard={(id) => {
               setState((prev) => ({
                 ...prev,
@@ -1318,6 +2188,7 @@ export default function App() {
               notify('Plateau supprimé.');
             }}
             onOpenPieceCreator={() => navigateToScreen('pieces')}
+            onTogglePieceVisibility={handleTogglePieceVisibility}
             onDeletePiece={handleDeletePiece}
             onApplySavedTheme={(t: SavedTheme) => {
               setState((prev) => ({
@@ -1344,6 +2215,10 @@ export default function App() {
               }));
               notify('Thème supprimé.');
             }}
+            onOpenFriendProfile={handleOpenFriendProfile}
+            onRespondFriendRequest={handleRespondFriendRequest}
+            onChallengeFriend={handleChallengeFriend}
+            onRemoveFriend={handleRemoveFriend}
             onNotify={notify}
           />
         )}
@@ -1355,7 +2230,15 @@ export default function App() {
             variants={allPlayableVariants}
             customPieces={state.pieces}
             settings={state.settings}
+            friends={friendsWithOnlineStatus}
+            sentFriendRequestUids={sentFriendRequestUids}
             onRateVariant={handleRateVariant}
+            onOpenPlayerProfile={handleOpenProfileFromRecord}
+            onSendFriendRequestFromRecord={(rec) =>
+              void handleSendFriendRequest(rec.opponentUid, {
+                nickname: rec.opponentName,
+              })
+            }
           />
         )}
 
@@ -1370,6 +2253,21 @@ export default function App() {
               navigateToScreen('home');
               setShowTutorial(true);
             }}
+            onTestBattleIntro={() =>
+              setPreviewBattleIntro({
+                open: true,
+                opponent: {
+                  nickname: 'Adversaire Type',
+                  avatarColor: '#38bdf8',
+                  avatarSymbol: '♘',
+                  eol: state.profile.eol || 400,
+                  title: 'Stratège',
+                  streakPieceSymbol: '♖',
+                  battleCardStyle: 'emerald',
+                  isOnline: true,
+                },
+              })
+            }
             onConnectCloud={handleConnectGoogleCloud}
             onDisconnectCloud={handleDisconnectGoogleCloud}
             onSyncAllNow={async () => {
@@ -1388,7 +2286,11 @@ export default function App() {
               notify('Profil et variantes synchronisés avec Firebase.');
             }}
             onUpdateProfile={(nextProfile) => {
-              setState((prev) => ({ ...prev, profile: nextProfile }));
+              setState((prev) => ({
+                ...prev,
+                profile: nextProfile,
+                pieces: appendUnlockedBonusPieces(prev.pieces, nextProfile),
+              }));
               syncProfileToServer(nextProfile);
               if (firebaseUser) {
                 void syncUserProfileToFirestore(firebaseUser, nextProfile).catch(() => {});
@@ -1448,6 +2350,101 @@ export default function App() {
         })}
       </nav>
 
+      {/* Demandes d’ami & invitations de partie en temps réel */}
+      {(incomingFriendRequests.length > 0 || incomingGameInvites.length > 0) && (
+        <div className="fixed bottom-16 md:bottom-5 right-3 sm:right-5 z-40 w-[calc(100vw-1.5rem)] max-w-sm space-y-2.5">
+          {incomingGameInvites.slice(0, 1).map((inv) => (
+            <div
+              key={inv.id}
+              className="rounded-2xl border border-amber-400/50 bg-[#121925]/95 backdrop-blur-md p-3.5 shadow-2xl space-y-2.5"
+            >
+              <div className="flex items-center gap-2.5">
+                <div
+                  className="w-9 h-9 rounded-xl p-1.5 flex items-center justify-center shrink-0"
+                  style={{ backgroundColor: inv.fromAvatarColor || '#7ebcff' }}
+                >
+                  <ChessPieceArtwork
+                    symbol={inv.fromAvatarSymbol || '♔'}
+                    mode="emblem"
+                    bgColor={inv.fromAvatarColor || '#7ebcff'}
+                    className="w-6 h-6"
+                  />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-100 truncate">
+                    {inv.fromNickname} vous propose une partie
+                  </div>
+                  <div className="text-[11px] text-amber-300 truncate">
+                    {inv.variantName} · {inv.fromEol} ÉOL
+                  </div>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleRespondGameInvite(inv, true)}
+                  className="flex-1 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-bold"
+                >
+                  Rejoindre
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRespondGameInvite(inv, false)}
+                  className="flex-1 py-2 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold"
+                >
+                  Refuser
+                </button>
+              </div>
+            </div>
+          ))}
+
+          {incomingFriendRequests.slice(0, 1).map((req) => (
+            <div
+              key={req.id}
+              className="rounded-2xl border border-sky-500/45 bg-[#121925]/95 backdrop-blur-md p-3.5 shadow-2xl space-y-2.5"
+            >
+              <div className="flex items-center gap-2.5">
+                <div
+                  className="w-9 h-9 rounded-xl p-1.5 flex items-center justify-center shrink-0"
+                  style={{ backgroundColor: req.fromAvatarColor || '#7ebcff' }}
+                >
+                  <ChessPieceArtwork
+                    symbol={req.fromAvatarSymbol || '♔'}
+                    mode="emblem"
+                    bgColor={req.fromAvatarColor || '#7ebcff'}
+                    className="w-6 h-6"
+                  />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-100 truncate">
+                    {req.fromNickname} vous demande en ami
+                  </div>
+                  <div className="text-[11px] text-slate-400 font-mono-num">
+                    {req.fromEol} ÉOL
+                  </div>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleRespondFriendRequest(req, true)}
+                  className="flex-1 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold"
+                >
+                  Accepter
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRespondFriendRequest(req, false)}
+                  className="flex-1 py-2 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold"
+                >
+                  Refuser
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       <OfflineIndicator />
 
       <TutorialModal
@@ -1494,6 +2491,55 @@ export default function App() {
           navigateToScreen('play');
         }}
       />
+
+      <PlayerProfileModal
+        open={profileModalState.open}
+        loading={profileModalState.loading}
+        player={profileModalState.player}
+        isFriend={Boolean(
+          profileModalState.player &&
+            friendsWithOnlineStatus.some((f) => f.uid === profileModalState.player!.uid)
+        )}
+        requestSent={Boolean(
+          profileModalState.player &&
+            sentFriendRequestUids.includes(profileModalState.player.uid)
+        )}
+        isSelf={Boolean(
+          profileModalState.player &&
+            (profileModalState.player.uid === state.profile.id ||
+              (firebaseUser && profileModalState.player.uid === firebaseUser.uid))
+        )}
+        playableVariants={allPlayableVariants}
+        onClose={() => setProfileModalState({ open: false, loading: false, player: null })}
+        onSendFriendRequest={(player) =>
+          void handleSendFriendRequest(player.uid, { nickname: player.nickname })
+        }
+        onChallengeFriend={(player, variant) =>
+          handleChallengeFriend(player, variant)
+        }
+        onPlayVariant={(v) => {
+          setState((prev) => ({
+            ...prev,
+            variants: prev.variants.some((x) => x.id === v.id)
+              ? prev.variants
+              : [v, ...prev.variants],
+          }));
+          setSelectedPlayVariantId(v.id);
+          setPlayInitialMode('ai');
+          setPlayInitialCompetitive(true);
+          navigateToScreen('play');
+        }}
+      />
+
+      {previewBattleIntro && (
+        <BattleIntroOverlay
+          open={previewBattleIntro.open}
+          player={getBattleCardFromProfile(state.profile, true)}
+          opponent={previewBattleIntro.opponent}
+          variantName="Aperçu Carte de Combat"
+          onFinish={() => setPreviewBattleIntro(null)}
+        />
+      )}
 
       {toastMsg && (
         <div

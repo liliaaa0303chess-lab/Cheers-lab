@@ -13,6 +13,7 @@ import {
   AI_LEVELS,
   getClosestAiLevelForEol,
   type AiDifficultyLevel,
+  type BattleCardStyle,
   type OnlineAiSeat,
   type OnlineHumanSeat,
   type PlayerSide,
@@ -96,6 +97,15 @@ function persistDb() {
 // ---------- Real-time Matchmaking & Game Rooms ----------
 const RECONNECT_GRACE_MS = 5 * 60 * 1000;
 
+interface CardMeta {
+  avatarColor?: string;
+  avatarSymbol?: string;
+  title?: string;
+  streakPieceSymbol?: string;
+  streakPieceLabel?: string;
+  battleCardStyle?: BattleCardStyle;
+}
+
 interface PlayerConn {
   ws: WebSocket;
   userId: string;
@@ -104,6 +114,7 @@ interface PlayerConn {
   side: PlayerSide;
   disconnectedAt?: number | null;
   eliminated?: boolean;
+  card?: CardMeta;
   theme?: {
     boardTexture?: string;
     boardLight?: string;
@@ -142,6 +153,7 @@ interface QueueEntry {
   variantId: string | null;
   variantSnapshot?: Variant;
   joinedAt: number;
+  card?: CardMeta;
   theme?: {
     boardTexture?: string;
     boardLight?: string;
@@ -175,6 +187,33 @@ function shuffleSides(sides: PlayerSide[]): PlayerSide[] {
 const rooms = new Map<string, OnlineRoom>();
 const roomByCode = new Map<string, string>();
 let matchmakingQueue: QueueEntry[] = [];
+const onlineUsers = new Map<string, Set<WebSocket>>();
+
+function registerOnlineSocket(userId: string, ws: WebSocket) {
+  if (!userId) return;
+  let set = onlineUsers.get(userId);
+  if (!set) {
+    set = new Set<WebSocket>();
+    onlineUsers.set(userId, set);
+  }
+  set.add(ws);
+}
+
+function unregisterOnlineSocket(userId: string | null, ws: WebSocket) {
+  if (!userId) return;
+  const set = onlineUsers.get(userId);
+  if (!set) return;
+  set.delete(ws);
+  if (set.size === 0) onlineUsers.delete(userId);
+}
+
+function sendToUser(userId: string, payload: unknown) {
+  const set = onlineUsers.get(userId);
+  if (!set) return;
+  for (const sock of set) {
+    safeSend(sock, payload);
+  }
+}
 
 function safeSend(ws: WebSocket, payload: unknown) {
   if (ws.readyState === WebSocket.OPEN) {
@@ -261,6 +300,12 @@ function launchOnlineRoom(room: OnlineRoom, customAiLevels?: number[]) {
     nickname: p.nickname,
     eol: p.eol,
     side: p.side,
+    avatarColor: p.card?.avatarColor,
+    avatarSymbol: p.card?.avatarSymbol,
+    title: p.card?.title,
+    streakPieceSymbol: p.card?.streakPieceSymbol,
+    streakPieceLabel: p.card?.streakPieceLabel,
+    battleCardStyle: p.card?.battleCardStyle,
     theme: p.theme,
   }));
 
@@ -271,6 +316,12 @@ function launchOnlineRoom(room: OnlineRoom, customAiLevels?: number[]) {
           userId: firstOther.userId,
           nickname: firstOther.nickname,
           eol: firstOther.eol,
+          avatarColor: firstOther.card?.avatarColor,
+          avatarSymbol: firstOther.card?.avatarSymbol,
+          title: firstOther.card?.title,
+          streakPieceSymbol: firstOther.card?.streakPieceSymbol,
+          streakPieceLabel: firstOther.card?.streakPieceLabel,
+          battleCardStyle: firstOther.card?.battleCardStyle,
           theme: firstOther.theme,
         }
       : {
@@ -341,6 +392,7 @@ function tryMatchQueue() {
           nickname: s.nickname,
           eol: s.eol,
           side: 'white',
+          card: s.card,
           theme: s.theme,
         })),
         aiSeats: [],
@@ -424,8 +476,8 @@ function tryMatchQueue() {
         targetPlayers,
         hostUserId: a.userId,
         players: [
-          { ws: a.ws, userId: a.userId, nickname: a.nickname, eol: a.eol, side: 'white', theme: a.theme },
-          { ws: b.ws, userId: b.userId, nickname: b.nickname, eol: b.eol, side: 'black', theme: b.theme },
+          { ws: a.ws, userId: a.userId, nickname: a.nickname, eol: a.eol, side: 'white', card: a.card, theme: a.theme },
+          { ws: b.ws, userId: b.userId, nickname: b.nickname, eol: b.eol, side: 'black', card: b.card, theme: b.theme },
         ],
         aiSeats: [],
         activeSides: [],
@@ -831,7 +883,47 @@ async function startServer() {
         const s = String(rawNick || fallback).trim().slice(0, 32) || fallback;
         return isContentFamilyFriendly(s, true) ? s : fallback;
       };
-      if (type === 'matchmaking:join') {
+      if (type === 'presence:hello') {
+        const userId = String(msg.userId || '');
+        if (userId) {
+          if (boundUserId && boundUserId !== userId) {
+            unregisterOnlineSocket(boundUserId, ws);
+          }
+          boundUserId = userId;
+          registerOnlineSocket(userId, ws);
+        }
+      } else if (type === 'presence:query') {
+        const ids = Array.isArray(msg.userIds) ? msg.userIds.slice(0, 100) : [];
+        const online: Record<string, boolean> = {};
+        for (const id of ids) {
+          const uid = String(id || '');
+          const sockets = onlineUsers.get(uid);
+          online[uid] = Boolean(
+            sockets && Array.from(sockets).some((s) => s.readyState === WebSocket.OPEN)
+          );
+        }
+        safeSend(ws, { type: 'presence:status', online });
+      } else if (type === 'friend:request') {
+        const toUid = String(msg.toUid || '');
+        if (toUid && msg.request) {
+          sendToUser(toUid, { type: 'friend:request_received', request: msg.request });
+        }
+      } else if (type === 'friend:response') {
+        const toUid = String(msg.toUid || '');
+        if (toUid) {
+          sendToUser(toUid, {
+            type: 'friend:response_received',
+            accepted: Boolean(msg.accepted),
+            fromUid: msg.fromUid,
+            friend: msg.friend,
+          });
+        }
+      } else if (type === 'friend:invite_game') {
+        const toUid = String(msg.toUid || '');
+        if (toUid && msg.invite) {
+          sendToUser(toUid, { type: 'friend:game_invite_received', invite: msg.invite });
+        }
+      } else if (type === 'matchmaking:join') {
         const userId = String(msg.userId || '');
         const nickname = sanitizeNick(msg.nickname, 'Joueur');
         const eol = Number(msg.eol || 400);
@@ -840,7 +932,9 @@ async function startServer() {
         const variantId = typeof msg.variantId === 'string' ? msg.variantId : null;
         const variantSnapshot = msg.variantSnapshot as Variant | undefined;
         const theme = msg.theme as QueueEntry['theme'];
+        const card = (msg.card as CardMeta | undefined) || undefined;
         boundUserId = userId;
+        registerOnlineSocket(userId, ws);
 
         matchmakingQueue = matchmakingQueue.filter((q) => q.userId !== userId && q.ws !== ws);
         matchmakingQueue.push({
@@ -853,6 +947,7 @@ async function startServer() {
           variantId,
           variantSnapshot,
           joinedAt: Date.now(),
+          card,
           theme,
         });
         safeSend(ws, { type: 'matchmaking:queued' });
@@ -866,8 +961,10 @@ async function startServer() {
         const competitive = msg.competitive !== false;
         const variant = msg.variant as Variant;
         const theme = msg.theme as PlayerConn['theme'];
+        const card = (msg.card as CardMeta | undefined) || undefined;
         if (!variant) return;
         boundUserId = userId;
+        registerOnlineSocket(userId, ws);
 
         const roomId = crypto.randomUUID();
         const code = generateRoomCode();
@@ -879,7 +976,7 @@ async function startServer() {
           competitive,
           targetPlayers,
           hostUserId: userId,
-          players: [{ ws, userId, nickname, eol, side: 'white', theme }],
+          players: [{ ws, userId, nickname, eol, side: 'white', card, theme }],
           aiSeats: [],
           activeSides: [],
           eliminatedSides: [],
@@ -914,7 +1011,9 @@ async function startServer() {
         const nickname = sanitizeNick(msg.nickname, 'Invité');
         const eol = Number(msg.eol || 400);
         const theme = msg.theme as PlayerConn['theme'];
+        const card = (msg.card as CardMeta | undefined) || undefined;
         boundUserId = userId;
+        registerOnlineSocket(userId, ws);
 
         const roomId = roomByCode.get(code);
         const room = roomId ? rooms.get(roomId) : undefined;
@@ -933,8 +1032,9 @@ async function startServer() {
         const existingPlayer = room.players.find((p) => p.userId === userId);
         if (existingPlayer) {
           existingPlayer.ws = ws;
+          existingPlayer.card = card;
         } else {
-          const guest: PlayerConn = { ws, userId, nickname, eol, side: 'black', theme };
+          const guest: PlayerConn = { ws, userId, nickname, eol, side: 'black', card, theme };
           room.players.push(guest);
         }
         boundRoomId = room.roomId;
@@ -994,6 +1094,12 @@ async function startServer() {
           nickname: p.nickname,
           eol: p.eol,
           side: p.side,
+          avatarColor: p.card?.avatarColor,
+          avatarSymbol: p.card?.avatarSymbol,
+          title: p.card?.title,
+          streakPieceSymbol: p.card?.streakPieceSymbol,
+          streakPieceLabel: p.card?.streakPieceLabel,
+          battleCardStyle: p.card?.battleCardStyle,
           theme: p.theme,
         }));
         const firstOther = room.players.find((other) => other.userId !== userId);
@@ -1002,6 +1108,12 @@ async function startServer() {
               userId: firstOther.userId,
               nickname: firstOther.nickname,
               eol: firstOther.eol,
+              avatarColor: firstOther.card?.avatarColor,
+              avatarSymbol: firstOther.card?.avatarSymbol,
+              title: firstOther.card?.title,
+              streakPieceSymbol: firstOther.card?.streakPieceSymbol,
+              streakPieceLabel: firstOther.card?.streakPieceLabel,
+              battleCardStyle: firstOther.card?.battleCardStyle,
               theme: firstOther.theme,
             }
           : {
@@ -1145,6 +1257,7 @@ async function startServer() {
     });
 
     ws.on('close', () => {
+      unregisterOnlineSocket(boundUserId, ws);
       matchmakingQueue = matchmakingQueue.filter((q) => q.ws !== ws);
       if (boundRoomId) {
         const room = rooms.get(boundRoomId);

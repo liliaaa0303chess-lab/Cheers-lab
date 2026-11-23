@@ -25,13 +25,18 @@ import {
   X,
 } from 'lucide-react';
 import { chooseBestAiMove } from '../engine/aiEngine';
+import { ChessPieceArtwork } from './ChessPieceArtwork';
 import {
   applyMove,
   cloneGameState,
   createInitialGameState,
   explainBlockedMove,
   getCurrentTurnSide,
+  getLegalDropMovesForSide,
   getLegalMovesForSquare,
+  getPieceName,
+  getPremoveCandidateTargets,
+  getPromotionChoicesForState,
   getSpecialPowerMoves,
   isStandardChessCompatible,
   SIDE_LABELS,
@@ -43,6 +48,7 @@ import {
   formatTeamLabel,
   getRemainingTeamGroups,
   getTeamSides,
+  resolveDynamicSpecialEffect,
 } from '../engine/ruleParser';
 import { computeEolTransfer } from '../engine/eol';
 import {
@@ -50,6 +56,8 @@ import {
   getClosestAiLevelForEol,
   type AiDifficultyLevel,
   type AppSettings,
+  type BattleCardData,
+  type BattleCardStyle,
   type EolBreakdown,
   type GameMode,
   type GameRecord,
@@ -59,6 +67,7 @@ import {
   type PlayerSide,
   type Profile,
   type ReplayMove,
+  type SpecialCellEffectType,
   type Variant,
 } from '../types/chess';
 import { playChessSound } from '../utils/sound';
@@ -69,8 +78,11 @@ import {
   saveActiveOnlineSession,
 } from '../utils/storage';
 import { getPublicAppUrl } from '../utils/appUrl';
+import { isGoldEffectActive } from '../utils/goldRewards';
+import { BattleIntroOverlay, getBattleCardFromProfile } from './BattleCard';
 import { ChessBoard } from './ChessBoard';
 import { VariantRulesSummary } from './VariantRulesSummary';
+import { VictoryEffects } from './VictoryEffects';
 
 interface WaitingPlayerInfo {
   userId: string;
@@ -105,6 +117,12 @@ interface GamePlayProps {
       userId: string;
       nickname: string;
       eol: number;
+      avatarColor?: string;
+      avatarSymbol?: string;
+      title?: string;
+      streakPieceSymbol?: string;
+      streakPieceLabel?: string;
+      battleCardStyle?: BattleCardStyle;
       theme?: { boardTexture?: string; boardLight?: string; boardDark?: string };
     };
     participants?: OnlineHumanSeat[];
@@ -121,6 +139,17 @@ interface GamePlayProps {
   onRateVariant: (variantId: string, stars: number) => void;
   onClearOnlineRoom?: () => void;
   onOpenChallenges?: (tab?: 'streak' | 'bots') => void;
+  pendingFriendInvite?: {
+    toUid: string;
+    toNickname: string;
+    variantId: string;
+    nonce: number;
+  } | null;
+  onRoomCreatedForFriend?: (
+    target: { toUid: string; toNickname: string },
+    roomCode: string,
+    variant: Variant
+  ) => void;
   onNotify: (msg: string) => void;
 }
 
@@ -161,12 +190,28 @@ function toReplayMove(m: LegalMove): ReplayMove {
     ...(m.captureIndex !== undefined ? { captureIndex: m.captureIndex } : {}),
     ...(m.promotionPieceId ? { promotionPieceId: m.promotionPieceId } : {}),
     ...(m.isCastle ? { isCastle: m.isCastle } : {}),
+    ...(m.castleRookFrom !== undefined ? { castleRookFrom: m.castleRookFrom } : {}),
+    ...(m.castleRookTo !== undefined ? { castleRookTo: m.castleRookTo } : {}),
     ...(m.isEnPassant ? { isEnPassant: m.isEnPassant } : {}),
+    ...(m.isDrop ? { isDrop: m.isDrop } : {}),
+    ...(m.dropPieceId ? { dropPieceId: m.dropPieceId } : {}),
     ...(m.isPower ? { isPower: m.isPower } : {}),
     ...(m.powerTarget !== undefined ? { powerTarget: m.powerTarget } : {}),
     ...(m.description ? { description: m.description } : {}),
   };
 }
+
+const SPECIAL_EFFECT_BADGE_LABELS: Record<SpecialCellEffectType, string> = {
+  none: 'Aucun effet',
+  boost_range: 'Portée augmentée',
+  teleport: 'Téléportation',
+  promote: 'Promotion instantanée',
+  shield: 'Bouclier',
+  freeze: 'Gel (1 tour)',
+  trap: 'Piège',
+  victory_zone: 'Zone de victoire',
+  forbidden: 'Accès restreint',
+};
 
 function formatEndCondition(gs: GameState): string {
   const reason = (gs.endReason || '').trim();
@@ -213,6 +258,8 @@ export const GamePlay: React.FC<GamePlayProps> = ({
   onRateVariant,
   onClearOnlineRoom,
   onOpenChallenges,
+  pendingFriendInvite = null,
+  onRoomCreatedForFriend,
   onNotify,
 }) => {
   const activeVariant = useMemo(
@@ -291,6 +338,14 @@ export const GamePlay: React.FC<GamePlayProps> = ({
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [selectedSquare, setSelectedSquare] = useState<number | null>(null);
+  const [selectedDropPieceId, setSelectedDropPieceId] = useState<string | null>(null);
+  const [premoveSelectedSquare, setPremoveSelectedSquare] = useState<number | null>(null);
+  const [queuedPremove, setQueuedPremove] = useState<{ from: number; to: number } | null>(null);
+  const [pendingPromotion, setPendingPromotion] = useState<{
+    baseMove: LegalMove;
+    side: PlayerSide;
+    choices: string[];
+  } | null>(null);
   const [analysisTrayPiece, setAnalysisTrayPiece] = useState<string>('builtin:Q|white');
   const [showRulesModal, setShowRulesModal] = useState(false);
   const [showResignConfirm, setShowResignConfirm] = useState(false);
@@ -299,6 +354,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
   const [engineBadge, setEngineBadge] = useState<'stockfish' | 'variant' | null>(null);
   const [lastEolBreakdown, setLastEolBreakdown] = useState<EolBreakdown | null>(null);
   const [endRatingHover, setEndRatingHover] = useState<number>(0);
+  const [battleIntroOpponent, setBattleIntroOpponent] = useState<BattleCardData | null>(null);
 
   // Clocks
   const [clocks, setClocks] = useState<Record<PlayerSide, number>>({
@@ -343,6 +399,14 @@ export const GamePlay: React.FC<GamePlayProps> = ({
   onlineWsRef.current = onlineWs;
   const autoJoinedUrlCodeRef = useRef<string>('');
   const attemptedSessionResumeRef = useRef(false);
+  const handledFriendInviteNonceRef = useRef<number | null>(null);
+  const dispatchedInviteNonceRef = useRef<number | null>(null);
+  const pendingFriendInviteRef = useRef(pendingFriendInvite);
+  pendingFriendInviteRef.current = pendingFriendInvite;
+  const activeVariantRef = useRef(activeVariant);
+  activeVariantRef.current = activeVariant;
+  const onRoomCreatedForFriendRef = useRef(onRoomCreatedForFriend);
+  onRoomCreatedForFriendRef.current = onRoomCreatedForFriend;
 
   useEffect(() => {
     return () => {
@@ -432,10 +496,27 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       setUndoMovesLenStack([]);
       setRecordedMoves([]);
       setSelectedSquare(null);
+      setSelectedDropPieceId(null);
+      setPremoveSelectedSquare(null);
+      setQueuedPremove(null);
       resetClocks(activeVariant);
       gameRecordedRef.current = false;
       setLastEolBreakdown(null);
       setPhase('playing');
+      if (profile.showBattleIntro !== false) {
+        setBattleIntroOpponent({
+          uid: autoMatchedRoom.opponent.userId,
+          nickname: autoMatchedRoom.opponent.nickname,
+          eol: autoMatchedRoom.opponent.eol,
+          avatarColor: autoMatchedRoom.opponent.avatarColor || '#f59e0b',
+          avatarSymbol: autoMatchedRoom.opponent.avatarSymbol || '♚',
+          title: autoMatchedRoom.opponent.title,
+          streakPieceSymbol: autoMatchedRoom.opponent.streakPieceSymbol || '♙',
+          streakPieceLabel: autoMatchedRoom.opponent.streakPieceLabel,
+          battleCardStyle: autoMatchedRoom.opponent.battleCardStyle || 'classic',
+          isOnline: true,
+        });
+      }
       saveActiveOnlineSession({
         roomId: autoMatchedRoom.roomId,
         code: autoMatchedRoom.code,
@@ -461,6 +542,10 @@ export const GamePlay: React.FC<GamePlayProps> = ({
   // Start local / AI / analysis game
   const startGame = (chosenMode: GameMode, overrideAiLevel?: AiDifficultyLevel) => {
     if (!activeVariant) return;
+    setPendingPromotion(null);
+    setSelectedDropPieceId(null);
+    setPremoveSelectedSquare(null);
+    setQueuedPremove(null);
     setMatchmakingActive(false);
     setWaitingRoomCode(null);
     setDisconnectedOpponents([]);
@@ -512,6 +597,34 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     gameRecordedRef.current = false;
     resetClocks(activeVariant);
     setPhase('playing');
+    if (chosenMode !== 'analysis' && profile.showBattleIntro !== false) {
+      if (chosenMode === 'ai') {
+        const meta = AI_LEVELS.find((l) => l.level === effectiveMainAi) || AI_LEVELS[2];
+        setBattleIntroOpponent({
+          uid: `ai_lvl_${effectiveMainAi}`,
+          nickname: `IA ${meta.label}`,
+          avatarColor: '#38bdf8',
+          avatarSymbol: '🤖',
+          eol: meta.approxEol,
+          title: `Bot Niveau ${meta.level}`,
+          streakPieceSymbol: '♘',
+          battleCardStyle: 'classic',
+          isOnline: false,
+        });
+      } else if (chosenMode === 'local') {
+        setBattleIntroOpponent({
+          uid: 'local_p2',
+          nickname: fresh.activeSides.length > 2 ? 'Joueurs locaux' : 'Joueur 2',
+          avatarColor: '#a78bfa',
+          avatarSymbol: '♚',
+          eol: Math.round(profile.eol || 400),
+          title: 'Duel sur le même écran',
+          streakPieceSymbol: '♙',
+          battleCardStyle: 'emerald',
+          isOnline: false,
+        });
+      }
+    }
     if (chosenMode === 'ai') {
       const sideLabel = SIDE_LABELS[chosenSide];
       onNotify(
@@ -559,6 +672,31 @@ export const GamePlay: React.FC<GamePlayProps> = ({
 
     return () => clearInterval(timer);
   }, [phase, gameState?.turnIndex, gameState?.winner, mode]);
+
+  useEffect(() => {
+    if (gameState?.winner) {
+      if (pendingPromotion) setPendingPromotion(null);
+      setSelectedDropPieceId(null);
+      setPremoveSelectedSquare(null);
+      setQueuedPremove(null);
+    }
+  }, [gameState?.winner, pendingPromotion]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (pendingPromotion) {
+        setPendingPromotion(null);
+        return;
+      }
+      setSelectedSquare(null);
+      setSelectedDropPieceId(null);
+      setPremoveSelectedSquare(null);
+      setQueuedPremove(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [pendingPromotion]);
 
   // Trigger timeout cleanly when active clock reaches 0 (local/AI; online timeout comes authoritatively or notifies server)
   useEffect(() => {
@@ -652,8 +790,16 @@ export const GamePlay: React.FC<GamePlayProps> = ({
             ? Math.round(allEols.reduce((s, e) => s + e, 0) / allEols.length)
             : onlineOpponent?.eol || 400;
         const nameList = [...humans.map((h) => h.nickname), ...onlineAiSeats.map((a) => a.nickname)];
+        const primaryHuman = humans[0];
         return {
           eol: avgEol,
+          uid: primaryHuman?.userId || onlineOpponent?.userId,
+          avatarColor: primaryHuman?.avatarColor || onlineOpponent?.avatarColor,
+          avatarSymbol: primaryHuman?.avatarSymbol || onlineOpponent?.avatarSymbol,
+          title: primaryHuman?.title || onlineOpponent?.title,
+          streakPieceSymbol:
+            primaryHuman?.streakPieceSymbol || onlineOpponent?.streakPieceSymbol,
+          battleCardStyle: primaryHuman?.battleCardStyle || onlineOpponent?.battleCardStyle,
           name: nameList.length > 0 ? nameList.join(', ') : onlineOpponent?.nickname || 'Adversaire en ligne',
           isCreator: humans.some((h) => h.userId === gameState.variant.creatorId),
         };
@@ -672,6 +818,12 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         return {
           eol: avg,
           aiLevel: firstLevel,
+          uid: undefined,
+          avatarColor: undefined,
+          avatarSymbol: undefined,
+          title: undefined,
+          streakPieceSymbol: undefined,
+          battleCardStyle: undefined,
           name:
             levelsUsed.length > 1
               ? `${levelsUsed.length} IA (~${avg} ÉOL)`
@@ -682,6 +834,12 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       return {
         eol: Math.max(300, profile.eol),
         aiLevel: undefined,
+        uid: undefined,
+        avatarColor: undefined,
+        avatarSymbol: undefined,
+        title: undefined,
+        streakPieceSymbol: undefined,
+        battleCardStyle: undefined,
         name: gameState.activeSides.length > 2 ? 'Joueurs locaux' : 'Joueur local',
         isCreator: false,
       };
@@ -723,7 +881,13 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         variantSnapshot: gameState.variant,
         creatorName: gameState.variant.creator,
         opponentName: oppStats.name,
+        ...(oppStats.uid ? { opponentUid: oppStats.uid } : {}),
         opponentEol: oppStats.eol,
+        ...(oppStats.avatarColor ? { opponentAvatarColor: oppStats.avatarColor } : {}),
+        ...(oppStats.avatarSymbol ? { opponentAvatarSymbol: oppStats.avatarSymbol } : {}),
+        ...(oppStats.title ? { opponentTitle: oppStats.title } : {}),
+        ...(oppStats.streakPieceSymbol ? { opponentStreakPiece: oppStats.streakPieceSymbol } : {}),
+        ...(oppStats.battleCardStyle ? { opponentBattleCardStyle: oppStats.battleCardStyle } : {}),
         ...(oppStats.aiLevel ? { aiLevel: oppStats.aiLevel } : {}),
         playerSide: mySide,
         result,
@@ -752,6 +916,13 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         variantSnapshot: gameState.variant,
         creatorName: gameState.variant.creator,
         opponentName: oppStats.name,
+        ...(oppStats.uid ? { opponentUid: oppStats.uid } : {}),
+        opponentEol: oppStats.eol,
+        ...(oppStats.avatarColor ? { opponentAvatarColor: oppStats.avatarColor } : {}),
+        ...(oppStats.avatarSymbol ? { opponentAvatarSymbol: oppStats.avatarSymbol } : {}),
+        ...(oppStats.title ? { opponentTitle: oppStats.title } : {}),
+        ...(oppStats.streakPieceSymbol ? { opponentStreakPiece: oppStats.streakPieceSymbol } : {}),
+        ...(oppStats.battleCardStyle ? { opponentBattleCardStyle: oppStats.battleCardStyle } : {}),
         ...(oppStats.aiLevel ? { aiLevel: oppStats.aiLevel } : {}),
         playerSide: mySide,
         result,
@@ -970,8 +1141,9 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       }
 
       if (msg.type === 'room:created') {
+        const roomCode = String(msg.code);
         setOnlineRoomId(String(msg.roomId));
-        setWaitingRoomCode(String(msg.code));
+        setWaitingRoomCode(roomCode);
         setOnlineTargetPlayers(Number(msg.targetPlayers || 2));
         setOnlineHostUserId(String(msg.hostUserId || profile.id));
         setOnlineWaitingPlayers(
@@ -979,7 +1151,22 @@ export const GamePlay: React.FC<GamePlayProps> = ({
             ? (msg.players as WaitingPlayerInfo[])
             : [{ userId: profile.id, nickname: profile.nickname || 'Hôte', eol: profile.eol }]
         );
-        onNotify(`Salle créée ! Partagez le code ${msg.code} ou le lien d’invitation.`);
+        const pending = pendingFriendInviteRef.current;
+        if (
+          pending &&
+          handledFriendInviteNonceRef.current === pending.nonce &&
+          dispatchedInviteNonceRef.current !== pending.nonce &&
+          activeVariantRef.current
+        ) {
+          dispatchedInviteNonceRef.current = pending.nonce;
+          onRoomCreatedForFriendRef.current?.(
+            { toUid: pending.toUid, toNickname: pending.toNickname },
+            roomCode,
+            activeVariantRef.current
+          );
+        } else {
+          onNotify(`Salle créée ! Partagez le code ${roomCode} ou le lien d’invitation.`);
+        }
       } else if (msg.type === 'room:lobby_update') {
         setOnlineRoomId(String(msg.roomId));
         setWaitingRoomCode(String(msg.code));
@@ -1047,6 +1234,9 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         setUndoStack([]);
         setUndoMovesLenStack([]);
         setSelectedSquare(null);
+        setSelectedDropPieceId(null);
+        setPremoveSelectedSquare(null);
+        setQueuedPremove(null);
         gameRecordedRef.current = Boolean(rebuilt.winner);
         setPhase(rebuilt.winner ? 'ended' : 'playing');
         saveActiveOnlineSession({
@@ -1093,6 +1283,9 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         setUndoMovesLenStack([]);
         setRecordedMoves([]);
         setSelectedSquare(null);
+        setSelectedDropPieceId(null);
+        setPremoveSelectedSquare(null);
+        setQueuedPremove(null);
         if (msg.clocks) {
           setClocks(msg.clocks as Record<PlayerSide, number>);
         } else {
@@ -1101,6 +1294,23 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         gameRecordedRef.current = false;
         setLastEolBreakdown(null);
         setPhase('playing');
+        if (profile.showBattleIntro !== false) {
+          const opp = msg.opponent as NonNullable<typeof onlineOpponent> | undefined;
+          if (opp) {
+            setBattleIntroOpponent({
+              uid: opp.userId,
+              nickname: opp.nickname,
+              eol: opp.eol,
+              avatarColor: opp.avatarColor || '#f59e0b',
+              avatarSymbol: opp.avatarSymbol || '♚',
+              title: opp.title,
+              streakPieceSymbol: opp.streakPieceSymbol || '♙',
+              streakPieceLabel: opp.streakPieceLabel,
+              battleCardStyle: opp.battleCardStyle || 'classic',
+              isOnline: !String(opp.userId || '').startsWith('ai_'),
+            });
+          }
+        }
         saveActiveOnlineSession({
           roomId: String(msg.roomId),
           code: String(msg.code),
@@ -1319,6 +1529,18 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, [mode, phase, onlineRoomId, onlineCode, profile.id]);
 
+  const buildMyCardMeta = () => {
+    const card = getBattleCardFromProfile(profile, true);
+    return {
+      avatarColor: card.avatarColor,
+      avatarSymbol: card.avatarSymbol,
+      title: card.title,
+      streakPieceSymbol: card.streakPieceSymbol,
+      streakPieceLabel: card.streakPieceLabel,
+      battleCardStyle: card.battleCardStyle,
+    };
+  };
+
   const handleStartOnlineMatchmaking = async () => {
     if (!activeVariant) return;
     setMatchmakingActive(true);
@@ -1336,6 +1558,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
           competitive: lobbyCompetitive,
           variantId: activeVariant.id,
           variantSnapshot: activeVariant,
+          card: buildMyCardMeta(),
           theme: {
             boardTexture: settings.boardTexture,
             boardLight: settings.boardLight,
@@ -1370,6 +1593,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
           eol: profile.eol,
           competitive: lobbyCompetitive,
           variant: activeVariant,
+          card: buildMyCardMeta(),
           theme: {
             boardTexture: settings.boardTexture,
             boardLight: settings.boardLight,
@@ -1398,6 +1622,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
           userId: profile.id,
           nickname: profile.nickname || 'Joueur',
           eol: profile.eol,
+          card: buildMyCardMeta(),
           theme: {
             boardTexture: settings.boardTexture,
             boardLight: settings.boardLight,
@@ -1440,6 +1665,23 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     }
   }, [initialJoinRoomCode, phase, waitingRoomCode, autoMatchedRoom]);
 
+  // Auto-create an online room when user clicked "Proposer une partie" to a friend
+  useEffect(() => {
+    if (
+      pendingFriendInvite &&
+      pendingFriendInvite.nonce !== handledFriendInviteNonceRef.current &&
+      activeVariant &&
+      activeVariant.id === pendingFriendInvite.variantId &&
+      phase === 'lobby' &&
+      !waitingRoomCode &&
+      !autoMatchedRoom
+    ) {
+      handledFriendInviteNonceRef.current = pendingFriendInvite.nonce;
+      setMode('online');
+      void handleCreateOnlineRoom();
+    }
+  }, [pendingFriendInvite, activeVariant?.id, phase, waitingRoomCode, autoMatchedRoom]);
+
   const copyFriendInvite = async (kind: 'code' | 'link', code: string) => {
     const text =
       kind === 'code'
@@ -1458,6 +1700,28 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     if (!gameState || selectedSquare === null || mode === 'analysis') return [];
     return getLegalMovesForSquare(gameState, selectedSquare, true);
   }, [gameState, selectedSquare, mode]);
+
+  const legalDropMovesForSelected = useMemo(() => {
+    if (!gameState || !selectedDropPieceId || mode === 'analysis' || gameState.winner) return [];
+    const turnSide = getCurrentTurnSide(gameState);
+    return getLegalDropMovesForSide(gameState, turnSide, selectedDropPieceId);
+  }, [gameState, selectedDropPieceId, mode]);
+
+  const myHumanControlSide: PlayerSide = mode === 'online' ? myOnlineSide : myPlayerSide;
+
+  const premoveTargetsForSelected = useMemo(() => {
+    if (
+      !gameState ||
+      premoveSelectedSquare === null ||
+      phase !== 'playing' ||
+      gameState.winner ||
+      (mode !== 'ai' && mode !== 'online')
+    ) {
+      return [];
+    }
+    if (getCurrentTurnSide(gameState) === myHumanControlSide) return [];
+    return getPremoveCandidateTargets(gameState, premoveSelectedSquare, myHumanControlSide);
+  }, [gameState, premoveSelectedSquare, phase, mode, myHumanControlSide]);
 
   const powerMovesForSelected = useMemo(() => {
     if (!gameState || selectedSquare === null || mode === 'analysis') return [];
@@ -1489,6 +1753,8 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     setRecordedMoves((prev) => [...prev, toReplayMove(move)]);
     setGameState(next);
     setSelectedSquare(null);
+    setSelectedDropPieceId(null);
+    setPremoveSelectedSquare(null);
 
     if (next.inCheckSides.length > 0) {
       playChessSound('check', settings.sound, settings.volume);
@@ -1515,6 +1781,47 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     }
   };
 
+  // Auto-execute queued premove when it becomes the player's turn
+  useEffect(() => {
+    if (
+      phase !== 'playing' ||
+      !gameState ||
+      gameState.winner ||
+      aiThinking ||
+      pendingPromotion ||
+      !queuedPremove
+    ) {
+      return;
+    }
+    if (mode !== 'ai' && mode !== 'online') return;
+    if (getCurrentTurnSide(gameState) !== myHumanControlSide) return;
+
+    const premove = queuedPremove;
+    setQueuedPremove(null);
+    setPremoveSelectedSquare(null);
+
+    const legal = getLegalMovesForSquare(gameState, premove.from, true);
+    const matched = legal.find((m) => m.to === premove.to);
+    if (!matched) return;
+
+    if (matched.promotionPieceId && !matched.isPower) {
+      const choices = getPromotionChoicesForState(gameState);
+      if (choices.length > 1) {
+        setPendingPromotion({
+          baseMove: matched,
+          side: myHumanControlSide,
+          choices,
+        });
+        return;
+      }
+      if (choices.length === 1) {
+        executePlayerMove({ ...matched, promotionPieceId: choices[0] });
+        return;
+      }
+    }
+    executePlayerMove(matched);
+  }, [phase, mode, gameState, queuedPremove, myHumanControlSide, aiThinking, pendingPromotion]);
+
   const canUndo =
     (mode === 'ai' || mode === 'local') &&
     phase === 'playing' &&
@@ -1526,6 +1833,10 @@ export const GamePlay: React.FC<GamePlayProps> = ({
   const handleUndo = () => {
     if (mode === 'online' || mode === 'analysis' || !gameState || gameState.winner) return;
     if (undoStack.length === 0) return;
+    setPendingPromotion(null);
+    setSelectedDropPieceId(null);
+    setPremoveSelectedSquare(null);
+    setQueuedPremove(null);
 
     if (mode === 'local') {
       const target = undoStack[undoStack.length - 1];
@@ -1556,6 +1867,105 @@ export const GamePlay: React.FC<GamePlayProps> = ({
     setGameState(restored);
     setSelectedSquare(null);
     onNotify('Votre dernier coup a été annulé.');
+  };
+
+  const tryCommitPlayerMove = (matched: LegalMove, currentTurn: PlayerSide) => {
+    if (matched.promotionPieceId && !matched.isPower) {
+      const choices = getPromotionChoicesForState(gameState!);
+      if (choices.length > 1) {
+        setPendingPromotion({
+          baseMove: matched,
+          side: currentTurn,
+          choices,
+        });
+        return;
+      }
+      if (choices.length === 1) {
+        executePlayerMove({ ...matched, promotionPieceId: choices[0] });
+        return;
+      }
+    }
+    executePlayerMove(matched);
+  };
+
+  const canDragBoardSquare = (index: number): boolean => {
+    if (!gameState) return false;
+    const piece = gameState.pieces[index];
+    if (!piece) return false;
+    if (mode === 'analysis') return true;
+    if (phase !== 'playing' || gameState.winner || pendingPromotion) return false;
+
+    const currentTurn = getCurrentTurnSide(gameState);
+    if (mode === 'local') {
+      return !aiSides.includes(currentTurn) && piece.side === currentTurn && piece.frozenTurns <= 0;
+    }
+    // AI or Online: allow dragging own pieces during own turn (active move) AND opponent's turn (premove)
+    if (piece.side !== myHumanControlSide) return false;
+    if (currentTurn === myHumanControlSide) {
+      return !aiThinking && piece.frozenTurns <= 0;
+    }
+    return true;
+  };
+
+  const handlePieceDrop = (from: number, to: number) => {
+    if (!gameState || from === to) return;
+
+    if (mode === 'analysis') {
+      if (gameState.board.cells[to] === 0 || gameState.board.blocked?.includes(to)) {
+        onNotify('Case bloquée ou supprimée.');
+        return;
+      }
+      const next = cloneGameState(gameState);
+      const moving = next.pieces[from];
+      if (!moving) return;
+      delete next.pieces[from];
+      next.pieces[to] = moving;
+      next.lastMove = { from, to };
+      playChessSound('move', settings.sound, settings.volume);
+      setGameState(next);
+      setSelectedSquare(null);
+      return;
+    }
+
+    if (phase !== 'playing' || gameState.winner || pendingPromotion) return;
+    const currentTurn = getCurrentTurnSide(gameState);
+    const isActiveTurn =
+      mode === 'local' ? !aiSides.includes(currentTurn) : currentTurn === myHumanControlSide;
+
+    if (!isActiveTurn) {
+      if (mode === 'ai' || mode === 'online') {
+        const piece = gameState.pieces[from];
+        if (!piece || piece.side !== myHumanControlSide) return;
+        const targets = getPremoveCandidateTargets(gameState, from, myHumanControlSide);
+        if (targets.includes(to)) {
+          setQueuedPremove({ from, to });
+          setPremoveSelectedSquare(null);
+        } else {
+          setPremoveSelectedSquare(null);
+        }
+      }
+      return;
+    }
+
+    if (aiThinking) return;
+    const legal = getLegalMovesForSquare(gameState, from, true);
+    const matched = legal.find((m) => m.to === to);
+    if (matched) {
+      tryCommitPlayerMove(matched, currentTurn);
+    } else {
+      const reason = explainBlockedMove(gameState, from, to);
+      if (reason) onNotify(reason);
+      setSelectedSquare(from);
+    }
+  };
+
+  const handleBoardContextMenu = () => {
+    setSelectedSquare(null);
+    setSelectedDropPieceId(null);
+    setPremoveSelectedSquare(null);
+    if (queuedPremove) {
+      setQueuedPremove(null);
+    }
   };
 
   const handleBoardClick = (index: number) => {
@@ -1606,17 +2016,56 @@ export const GamePlay: React.FC<GamePlayProps> = ({
       return;
     }
 
-    if (gameState.winner || aiThinking) return;
+    if (gameState.winner || pendingPromotion) return;
 
     const currentTurn = getCurrentTurnSide(gameState);
-    if (mode === 'ai' && currentTurn !== myPlayerSide) return;
-    if (mode === 'local' && aiSides.includes(currentTurn)) return;
-    if (mode === 'online' && currentTurn !== myOnlineSide) return;
+    const isMyInputTurn =
+      !aiThinking &&
+      (mode === 'ai'
+        ? currentTurn === myPlayerSide
+        : mode === 'local'
+          ? !aiSides.includes(currentTurn)
+          : currentTurn === myOnlineSide);
+
+    // Premove flow during opponent turn (AI / Online)
+    if (!isMyInputTurn) {
+      if (phase === 'playing' && (mode === 'ai' || mode === 'online')) {
+        if (premoveSelectedSquare !== null) {
+          if (premoveSelectedSquare === index) {
+            setPremoveSelectedSquare(null);
+            return;
+          }
+          if (premoveTargetsForSelected.includes(index)) {
+            setQueuedPremove({ from: premoveSelectedSquare, to: index });
+            setPremoveSelectedSquare(null);
+            return;
+          }
+        }
+        const clickedOwn = gameState.pieces[index];
+        if (clickedOwn && clickedOwn.side === myHumanControlSide) {
+          setPremoveSelectedSquare(index);
+        } else {
+          setPremoveSelectedSquare(null);
+          setQueuedPremove(null);
+        }
+      }
+      return;
+    }
+
+    // Parachutage placement
+    if (selectedDropPieceId) {
+      const matchedDrop = legalDropMovesForSelected.find((m) => m.to === index);
+      if (matchedDrop) {
+        executePlayerMove(matchedDrop);
+        return;
+      }
+      setSelectedDropPieceId(null);
+    }
 
     if (selectedSquare !== null) {
       const matched = legalMovesForSelected.find((m) => m.to === index);
       if (matched) {
-        executePlayerMove(matched);
+        tryCommitPlayerMove(matched, currentTurn);
         return;
       }
     }
@@ -1627,6 +2076,7 @@ export const GamePlay: React.FC<GamePlayProps> = ({
         onNotify('Cette pièce est gelée pour ce tour.');
         return;
       }
+      setSelectedDropPieceId(null);
       setSelectedSquare(index);
     } else {
       if (selectedSquare !== null && selectedSquare !== index) {
@@ -2084,6 +2534,163 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               <span>Diminuer l’écran</span>
             </button>
           )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderReserveTray = (compactBar = false) => {
+    if (!gameState || mode === 'analysis' || !gameState.compiledRules?.allowPieceDrops) {
+      return null;
+    }
+    const displaySide: PlayerSide =
+      mode === 'local' ? currentTurnSide : effectiveMySide;
+    const reserve = gameState.capturedReserve?.[displaySide] || [];
+    const counts = new Map<string, number>();
+    for (const pid of reserve) {
+      counts.set(pid, (counts.get(pid) || 0) + 1);
+    }
+    const entries = Array.from(counts.entries());
+    const canPickReserve =
+      phase === 'playing' &&
+      !gameState.winner &&
+      isMyTurn &&
+      !aiThinking &&
+      !pendingPromotion;
+
+    return (
+      <div
+        className={`flex flex-wrap items-center gap-1.5 rounded-xl border px-3 py-2 ${
+          compactBar
+            ? 'w-full max-w-6xl shrink-0 border-slate-800 bg-[#0d131d]'
+            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-[#151c27]'
+        }`}
+      >
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mr-1">
+          Réserve ({SIDE_LABELS[displaySide]}) :
+        </span>
+        {entries.length === 0 ? (
+          <span className="text-xs text-slate-500">
+            Aucune pièce capturée
+          </span>
+        ) : (
+          entries.map(([pid, qty]) => {
+            const active = selectedDropPieceId === pid;
+            const cDef = gameState.customPieceMap[pid];
+            return (
+              <button
+                key={pid}
+                type="button"
+                disabled={!canPickReserve}
+                onClick={() => {
+                  setSelectedSquare(null);
+                  setPremoveSelectedSquare(null);
+                  setSelectedDropPieceId((curr) => (curr === pid ? null : pid));
+                }}
+                className={`relative inline-flex items-center gap-1 px-2 py-1 rounded-lg border transition-colors min-h-[36px] disabled:opacity-50 ${
+                  active
+                    ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200'
+                    : 'border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-[#111824] hover:border-sky-400 text-slate-200'
+                }`}
+                title={`Parachuter : ${getPieceName(pid, gameState.customPieceMap)}`}
+              >
+                <ChessPieceArtwork
+                  pieceId={pid}
+                  symbol={cDef?.symbol}
+                  side={displaySide}
+                  texture={cDef?.texture || settings.pieceTexture}
+                  lightColor={cDef?.light || settings.pieceLight}
+                  darkColor={cDef?.dark || settings.pieceDark}
+                  mode="board"
+                  className="w-6 h-6"
+                />
+                {qty > 1 && (
+                  <span className="text-[11px] font-mono-num font-bold text-amber-300">
+                    ×{qty}
+                  </span>
+                )}
+              </button>
+            );
+          })
+        )}
+        {selectedDropPieceId && (
+          <span className="text-[11px] text-emerald-300 ml-auto">
+            Cliquez sur une case libre pour parachuter
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  const renderPromotionOverlay = () => {
+    if (!pendingPromotion || !gameState || gameState.winner) return null;
+    const allCustomMap = gameState.customPieceMap;
+    return (
+      <div
+        className="absolute inset-0 z-30 rounded-xl bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Choisir une pièce de promotion"
+      >
+        <div className="w-full max-w-md rounded-2xl border border-amber-400/50 bg-[#121925] p-4 sm:p-5 shadow-2xl space-y-4">
+          <div className="text-center space-y-1">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+              Promotion · {SIDE_LABELS[pendingPromotion.side]}
+            </div>
+            <h3 className="text-base sm:text-lg font-bold text-white">
+              Choisissez la pièce d’arrivée
+            </h3>
+          </div>
+
+          <div
+            className={`grid gap-2.5 ${
+              pendingPromotion.choices.length <= 4 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-2 sm:grid-cols-3'
+            }`}
+          >
+            {pendingPromotion.choices.map((pid) => {
+              const cDef = allCustomMap[pid];
+              const label = getPieceName(pid, allCustomMap);
+              return (
+                <button
+                  key={pid}
+                  type="button"
+                  onClick={() => {
+                    const chosenMove: LegalMove = {
+                      ...pendingPromotion.baseMove,
+                      promotionPieceId: pid,
+                    };
+                    setPendingPromotion(null);
+                    executePlayerMove(chosenMove);
+                  }}
+                  className="flex flex-col items-center justify-center gap-1.5 p-3 rounded-xl border border-slate-700 hover:border-amber-400 bg-[#0d131d] hover:bg-amber-500/10 transition-colors min-h-[84px]"
+                >
+                  <ChessPieceArtwork
+                    pieceId={pid}
+                    symbol={cDef?.symbol}
+                    side={pendingPromotion.side}
+                    texture={cDef?.texture || settings.pieceTexture}
+                    lightColor={cDef?.light || settings.pieceLight}
+                    darkColor={cDef?.dark || settings.pieceDark}
+                    mode="board"
+                    className="w-10 h-10"
+                  />
+                  <span className="text-xs font-semibold text-slate-100 text-center leading-tight line-clamp-1">
+                    {label}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex justify-center">
+            <button
+              type="button"
+              onClick={() => setPendingPromotion(null)}
+              className="px-4 py-2 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 text-xs font-semibold min-h-[40px]"
+            >
+              Annuler le coup
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -2688,23 +3295,59 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                 opponentThemeOverride={
                   mode === 'online' && settings.showOpponentTheme ? onlineOpponent?.theme : null
                 }
-                selectedSquare={selectedSquare}
-                legalTargets={legalMovesForSelected
-                  .filter((m) => !m.isPower && m.captureIndex === undefined)
-                  .map((m) => m.to)}
+                selectedSquare={isMyTurn ? selectedSquare : premoveSelectedSquare}
+                legalTargets={[
+                  ...legalMovesForSelected
+                    .filter((m) => !m.isPower && m.captureIndex === undefined)
+                    .map((m) => m.to),
+                  ...legalDropMovesForSelected.map((m) => m.to),
+                ]}
                 captureTargets={legalMovesForSelected
                   .filter((m) => m.captureIndex !== undefined)
                   .map((m) => m.to)}
                 powerTargets={legalMovesForSelected.filter((m) => m.isPower).map((m) => m.to)}
+                premoveTargets={premoveTargetsForSelected}
+                premoveSquares={queuedPremove}
                 lastMove={gameState.lastMove}
                 inCheckSquares={inCheckSquares}
                 viewerSide={mode === 'analysis' ? null : effectiveMySide}
                 fullscreen
                 isMyTurnHighlight={isMyTurn}
+                gameWon={
+                  phase === 'ended' &&
+                  Boolean(gameState.winner && gameState.winner !== 'draw') &&
+                  areSidesAllied(gameState.compiledRules, gameState.winner as PlayerSide, effectiveMySide)
+                }
+                goldEffects={{
+                  goldLastMove: isGoldEffectActive(profile, 'gold_last_move'),
+                  captureSparks: isGoldEffectActive(profile, 'capture_sparks'),
+                  checkPulse: isGoldEffectActive(profile, 'check_pulse'),
+                  powerShimmer: isGoldEffectActive(profile, 'power_shimmer'),
+                  victoryCrownFrame: isGoldEffectActive(profile, 'victory_crown_frame'),
+                  boardGoldSheen: isGoldEffectActive(profile, 'board_gold_sheen'),
+                  turnAura: isGoldEffectActive(profile, 'turn_aura'),
+                }}
+                canDragSquare={canDragBoardSquare}
+                onPieceDrop={handlePieceDrop}
+                onBoardContextMenu={handleBoardContextMenu}
                 onCellClick={handleBoardClick}
               />
+              {renderPromotionOverlay()}
               {renderBoardHidingOverlay()}
             </div>
+
+            {queuedPremove && (
+              <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-950/90 border border-cyan-400/60 text-cyan-200 text-xs shadow-lg">
+                <span>Coup anticipé prêt</span>
+                <button
+                  type="button"
+                  onClick={() => setQueuedPremove(null)}
+                  className="underline hover:text-white font-semibold"
+                >
+                  Annuler
+                </button>
+              </div>
+            )}
 
             {/* Pouvoir spécial flottant pour ne jamais modifier la hauteur des barres */}
             {selectedSquare !== null &&
@@ -2726,6 +3369,9 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                 </div>
               )}
           </div>
+
+          {/* Réserve parachutage compacte en plein écran si activée */}
+          {renderReserveTray(true)}
 
           {/* Barre inférieure à hauteur fixe : indicateur visuel fort + pendule */}
           <div
@@ -2842,21 +3488,65 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                 opponentThemeOverride={
                   mode === 'online' && settings.showOpponentTheme ? onlineOpponent?.theme : null
                 }
-                selectedSquare={selectedSquare}
-                legalTargets={legalMovesForSelected
-                  .filter((m) => !m.isPower && m.captureIndex === undefined)
-                  .map((m) => m.to)}
+                selectedSquare={isMyTurn ? selectedSquare : premoveSelectedSquare}
+                legalTargets={[
+                  ...legalMovesForSelected
+                    .filter((m) => !m.isPower && m.captureIndex === undefined)
+                    .map((m) => m.to),
+                  ...legalDropMovesForSelected.map((m) => m.to),
+                ]}
                 captureTargets={legalMovesForSelected
                   .filter((m) => m.captureIndex !== undefined)
                   .map((m) => m.to)}
                 powerTargets={legalMovesForSelected.filter((m) => m.isPower).map((m) => m.to)}
+                premoveTargets={premoveTargetsForSelected}
+                premoveSquares={queuedPremove}
                 lastMove={gameState.lastMove}
                 inCheckSquares={inCheckSquares}
                 viewerSide={mode === 'analysis' ? null : effectiveMySide}
                 isMyTurnHighlight={isMyTurn}
+                gameWon={
+                  phase === 'ended' &&
+                  Boolean(gameState.winner && gameState.winner !== 'draw') &&
+                  areSidesAllied(gameState.compiledRules, gameState.winner as PlayerSide, effectiveMySide)
+                }
+                goldEffects={{
+                  goldLastMove: isGoldEffectActive(profile, 'gold_last_move'),
+                  captureSparks: isGoldEffectActive(profile, 'capture_sparks'),
+                  checkPulse: isGoldEffectActive(profile, 'check_pulse'),
+                  powerShimmer: isGoldEffectActive(profile, 'power_shimmer'),
+                  victoryCrownFrame: isGoldEffectActive(profile, 'victory_crown_frame'),
+                  boardGoldSheen: isGoldEffectActive(profile, 'board_gold_sheen'),
+                  turnAura: isGoldEffectActive(profile, 'turn_aura'),
+                }}
+                canDragSquare={canDragBoardSquare}
+                onPieceDrop={handlePieceDrop}
+                onBoardContextMenu={handleBoardContextMenu}
                 onCellClick={handleBoardClick}
               />
+              {renderPromotionOverlay()}
               {renderBoardHidingOverlay()}
+              {battleIntroOpponent && (
+                <BattleIntroOverlay
+                  open={true}
+                  player={getBattleCardFromProfile(profile, true)}
+                  opponent={battleIntroOpponent}
+                  variantName={gameState.variant.name}
+                  onFinish={() => setBattleIntroOpponent(null)}
+                />
+              )}
+              <VictoryEffects
+                active={
+                  phase === 'ended' &&
+                  Boolean(gameState.winner && gameState.winner !== 'draw') &&
+                  areSidesAllied(gameState.compiledRules, gameState.winner as PlayerSide, effectiveMySide)
+                }
+                confettiEnabled={isGoldEffectActive(profile, 'confetti_win')}
+                starburstEnabled={isGoldEffectActive(profile, 'starburst_checkmate')}
+                signatureMateEnabled={
+                  (profile.goldCoins || 0) >= 100 && profile.gold100Choice === 'signature_mate'
+                }
+              />
             </div>
 
             {/* Bandeau joueur du bas */}
@@ -2898,6 +3588,34 @@ export const GamePlay: React.FC<GamePlayProps> = ({
               </div>
               {renderClockBadge(effectiveMySide, isMyTurn, true)}
             </div>
+
+            {renderReserveTray(false)}
+
+            {queuedPremove && (
+              <div className="flex items-center justify-between gap-2 px-3.5 py-2 rounded-xl border border-cyan-500/40 bg-cyan-500/10 text-xs text-cyan-200">
+                <span>Coup anticipé enregistré — il sera joué automatiquement à votre tour.</span>
+                <button
+                  type="button"
+                  onClick={() => setQueuedPremove(null)}
+                  className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 font-semibold"
+                >
+                  Annuler
+                </button>
+              </div>
+            )}
+
+            {gameState.compiledRules?.timedRules?.some((r) => r.kind === 'rotate_special_effect') && (
+              <div className="flex items-center justify-between gap-2 px-3.5 py-2 rounded-xl border border-amber-500/35 bg-amber-500/10 text-xs text-amber-200">
+                <span>
+                  ✦ Effet actif des cases spéciales :{' '}
+                  <strong>
+                    {SPECIAL_EFFECT_BADGE_LABELS[
+                      resolveDynamicSpecialEffect(gameState.compiledRules, gameState.fullMoveNumber)
+                    ]}
+                  </strong>
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Colonne Contrôles */}
@@ -2943,14 +3661,6 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                     'builtin:B|black', 'builtin:N|black', 'builtin:P|black',
                   ].map((ref) => {
                     const isWhite = ref.endsWith('white');
-                    const symMap: Record<string, string> = {
-                      'builtin:K': '♚',
-                      'builtin:Q': '♛',
-                      'builtin:R': '♜',
-                      'builtin:B': '♝',
-                      'builtin:N': '♞',
-                      'builtin:P': '♟',
-                    };
                     const pid = ref.split('|')[0];
                     return (
                       <button
@@ -2960,14 +3670,22 @@ export const GamePlay: React.FC<GamePlayProps> = ({
                           setAnalysisTrayPiece(ref);
                           setSelectedSquare(null);
                         }}
-                        className={`py-2 rounded-lg border text-xl min-h-[42px] ${
+                        className={`py-2 rounded-lg border min-h-[42px] flex items-center justify-center ${
                           analysisTrayPiece === ref
                             ? 'border-sky-500 bg-sky-500/20'
                             : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0f151f]'
                         }`}
                       >
-                        <span className={`piece-glyph ${isWhite ? 'piece-side-white' : 'piece-side-black'}`}>
-                          {symMap[pid]}
+                        <span className="w-7 h-7 mx-auto flex items-center justify-center">
+                          <ChessPieceArtwork
+                            pieceId={pid}
+                            side={isWhite ? 'white' : 'black'}
+                            texture={settings.pieceTexture}
+                            lightColor={settings.pieceLight}
+                            darkColor={settings.pieceDark}
+                            mode="board"
+                            className="w-7 h-7"
+                          />
                         </span>
                       </button>
                     );

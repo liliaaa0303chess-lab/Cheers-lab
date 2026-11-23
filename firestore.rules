@@ -34,6 +34,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidPairId(id) {
+      return id is string && id.size() >= 3 && id.size() <= 260 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
     function isHexColor(val) {
       return val is string && val.size() == 7 && val.matches('^#[0-9a-fA-F]{6}$');
     }
@@ -52,6 +56,9 @@ service cloud.firestore {
           'eol', 'gamesPlayed', 'wins', 'draws', 'losses',
           'discoveredVariants', 'loginStreak', 'bestLoginStreak',
           'lastStreakDate', 'botChallenges', 'botRebellionUnlocked',
+          'goldCoins', 'goldEffectIds', 'gold100Choice', 'gold1000Choice',
+          'customGoldTitle', 'equippedTitle', 'equippedStreakPiece',
+          'battleCardStyle', 'showBattleIntro',
           'createdAt', 'updatedAt'
         ])
         && isValidId(data.uid)
@@ -71,6 +78,15 @@ service cloud.firestore {
         && (!('lastStreakDate' in data) || (data.lastStreakDate is string && data.lastStreakDate.size() <= 16))
         && (!('botChallenges' in data) || (data.botChallenges is map && data.botChallenges.size() <= 16))
         && (!('botRebellionUnlocked' in data) || data.botRebellionUnlocked is bool)
+        && (!('goldCoins' in data) || (data.goldCoins is int && data.goldCoins >= 0 && data.goldCoins <= 1000000))
+        && (!('goldEffectIds' in data) || (data.goldEffectIds is list && data.goldEffectIds.size() <= 32 && (data.goldEffectIds.size() == 0 || data.goldEffectIds[0] is string)))
+        && (!('gold100Choice' in data) || data.gold100Choice == null || data.gold100Choice in ['board_piece', 'signature_mate'])
+        && (!('gold1000Choice' in data) || data.gold1000Choice == null || (data.gold1000Choice is string && data.gold1000Choice.size() <= 64))
+        && (!('customGoldTitle' in data) || (data.customGoldTitle is string && data.customGoldTitle.size() <= 48))
+        && (!('equippedTitle' in data) || data.equippedTitle == null || (data.equippedTitle is string && data.equippedTitle.size() <= 48))
+        && (!('equippedStreakPiece' in data) || (data.equippedStreakPiece is string && data.equippedStreakPiece.size() <= 8))
+        && (!('battleCardStyle' in data) || data.battleCardStyle in ['classic', 'emerald', 'crimson', 'imperial', 'cosmic'])
+        && (!('showBattleIntro' in data) || data.showBattleIntro is bool)
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -96,6 +112,41 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidPublicPlayerProfile(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'loginStreak', 'bestLoginStreak',
+          'goldCoins', 'unlockedTitles', 'isOnline', 'isPublic', 'lastSeenAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'loginStreak', 'bestLoginStreak',
+          'goldCoins', 'unlockedTitles', 'equippedTitle', 'streakPieceSymbol',
+          'streakPieceLabel', 'battleCardStyle', 'isOnline', 'isPublic',
+          'lastSeenAt', 'updatedAt'
+        ])
+        && isValidId(data.uid) && data.uid == userId && data.uid == request.auth.uid
+        && data.nickname is string && data.nickname.size() >= 1 && data.nickname.size() <= 32
+        && isHexColor(data.avatarColor)
+        && data.avatarSymbol is string && data.avatarSymbol.size() >= 1 && data.avatarSymbol.size() <= 8
+        && data.eol is number && data.eol >= 100 && data.eol <= 5000
+        && data.gamesPlayed is int && data.gamesPlayed >= 0 && data.gamesPlayed <= 1000000
+        && data.wins is int && data.wins >= 0 && data.wins <= 1000000
+        && data.loginStreak is int && data.loginStreak >= 0 && data.loginStreak <= 100000
+        && data.bestLoginStreak is int && data.bestLoginStreak >= 0 && data.bestLoginStreak <= 100000
+        && data.goldCoins is int && data.goldCoins >= 0 && data.goldCoins <= 1000000
+        && data.unlockedTitles is list && data.unlockedTitles.size() <= 16
+        && (data.unlockedTitles.size() == 0 || (data.unlockedTitles[0] is string && data.unlockedTitles[0].size() <= 48))
+        && (!('equippedTitle' in data) || data.equippedTitle == null || (data.equippedTitle is string && data.equippedTitle.size() <= 48))
+        && (!('streakPieceSymbol' in data) || (data.streakPieceSymbol is string && data.streakPieceSymbol.size() <= 8))
+        && (!('streakPieceLabel' in data) || (data.streakPieceLabel is string && data.streakPieceLabel.size() <= 48))
+        && (!('battleCardStyle' in data) || data.battleCardStyle in ['classic', 'emerald', 'crimson', 'imperial', 'cosmic'])
+        && data.isOnline is bool
+        && data.isPublic is bool
+        && data.lastSeenAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     function isValidBoardMap(board) {
       return board is map
         && board.keys().hasAll([
@@ -103,9 +154,10 @@ service cloud.firestore {
           'specialEffect', 'texture', 'light', 'dark', 'rotation'
         ])
         && board.keys().hasOnly([
-          'id', 'name', 'rows', 'cols', 'cells', 'blocked', 'special',
+          'id', 'name', 'visibility', 'rows', 'cols', 'cells', 'blocked', 'special',
           'specialEffectType', 'specialEffect', 'texture', 'light', 'dark', 'rotation'
         ])
+        && (!('visibility' in board) || board.visibility in ['private', 'public'])
         && board.rows is int && board.rows >= 2 && board.rows <= 16
         && board.cols is int && board.cols >= 2 && board.cols <= 16
         && board.cells is list && board.cells.size() >= 4 && board.cells.size() <= 256
@@ -115,10 +167,135 @@ service cloud.firestore {
         && board.special is list && board.special.size() >= 4 && board.special.size() <= 256
         && board.special[0] is int
         && board.specialEffect is string && board.specialEffect.size() <= 300
-        && board.texture in ['plain', 'wood', 'stone', 'marble', 'metal', 'night']
+        && board.texture in ['plain', 'wood', 'stone', 'marble', 'metal', 'night', 'gold_night']
         && isHexColor(board.light)
         && isHexColor(board.dark)
         && board.rotation is number && board.rotation >= 0 && board.rotation <= 360;
+    }
+
+    function isValidPublicPiece(data, pieceId) {
+      return data.keys().hasAll([
+          'id', 'name', 'symbol', 'visibility', 'moves', 'customMoves',
+          'powerType', 'powers', 'conditions', 'limits', 'limitsText',
+          'texture', 'light', 'dark', 'description', 'creatorUid', 'creator',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'symbol', 'visibility', 'moves', 'customMoves',
+          'powerType', 'powers', 'conditions', 'limits', 'limitsText',
+          'texture', 'light', 'dark', 'description', 'creatorUid', 'creator',
+          'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == pieceId
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 64
+        && data.symbol is string && data.symbol.size() >= 1 && data.symbol.size() <= 8
+        && data.visibility in ['private', 'public']
+        && data.moves is map && data.moves.size() <= 16
+        && data.customMoves is string && data.customMoves.size() <= 500
+        && data.powerType is string && data.powerType.size() <= 32
+        && data.powers is string && data.powers.size() <= 500
+        && data.conditions is string && data.conditions.size() <= 500
+        && data.limits is int && data.limits >= 0 && data.limits <= 1000
+        && data.limitsText is string && data.limitsText.size() <= 120
+        && data.texture in ['plain', 'wood', 'stone', 'marble', 'metal']
+        && isHexColor(data.light)
+        && isHexColor(data.dark)
+        && data.description is string && data.description.size() <= 600
+        && isValidId(data.creatorUid) && data.creatorUid == request.auth.uid
+        && data.creator is string && data.creator.size() >= 1 && data.creator.size() <= 32
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicBoard(data, boardId) {
+      return data.keys().hasAll([
+          'id', 'name', 'visibility', 'rows', 'cols', 'cells', 'blocked',
+          'special', 'specialEffect', 'texture', 'light', 'dark', 'rotation',
+          'creatorUid', 'creator', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'visibility', 'rows', 'cols', 'cells', 'blocked',
+          'special', 'specialEffectType', 'specialEffect', 'texture', 'light', 'dark',
+          'rotation', 'creatorUid', 'creator', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.id) && data.id == boardId
+        && data.name is string && data.name.size() >= 1 && data.name.size() <= 64
+        && data.visibility in ['private', 'public']
+        && data.rows is int && data.rows >= 2 && data.rows <= 16
+        && data.cols is int && data.cols >= 2 && data.cols <= 16
+        && data.cells is list && data.cells.size() >= 4 && data.cells.size() <= 256 && data.cells[0] is int
+        && data.blocked is list && data.blocked.size() >= 4 && data.blocked.size() <= 256 && data.blocked[0] is int
+        && data.special is list && data.special.size() >= 4 && data.special.size() <= 256 && data.special[0] is int
+        && (!('specialEffectType' in data) || (data.specialEffectType is string && data.specialEffectType.size() <= 32))
+        && data.specialEffect is string && data.specialEffect.size() <= 300
+        && data.texture in ['plain', 'wood', 'stone', 'marble', 'metal', 'night', 'gold_night']
+        && isHexColor(data.light)
+        && isHexColor(data.dark)
+        && data.rotation is number && data.rotation >= 0 && data.rotation <= 360
+        && isValidId(data.creatorUid) && data.creatorUid == request.auth.uid
+        && data.creator is string && data.creator.size() >= 1 && data.creator.size() <= 32
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidFriendRequest(data, requestId) {
+      return data.keys().hasAll([
+          'id', 'fromUid', 'fromNickname', 'fromAvatarColor', 'fromAvatarSymbol',
+          'fromEol', 'toUid', 'status', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'fromUid', 'fromNickname', 'fromAvatarColor', 'fromAvatarSymbol',
+          'fromEol', 'fromTitle', 'fromStreakPieceSymbol', 'fromBattleCardStyle',
+          'toUid', 'status', 'createdAt'
+        ])
+        && isValidId(data.id) && data.id == requestId
+        && isValidId(data.fromUid) && data.fromUid == request.auth.uid
+        && isValidId(data.toUid) && data.toUid != request.auth.uid
+        && data.fromNickname is string && data.fromNickname.size() >= 1 && data.fromNickname.size() <= 32
+        && isHexColor(data.fromAvatarColor)
+        && data.fromAvatarSymbol is string && data.fromAvatarSymbol.size() >= 1 && data.fromAvatarSymbol.size() <= 8
+        && data.fromEol is number && data.fromEol >= 100 && data.fromEol <= 5000
+        && (!('fromTitle' in data) || data.fromTitle == null || (data.fromTitle is string && data.fromTitle.size() <= 48))
+        && (!('fromStreakPieceSymbol' in data) || (data.fromStreakPieceSymbol is string && data.fromStreakPieceSymbol.size() <= 8))
+        && (!('fromBattleCardStyle' in data) || data.fromBattleCardStyle in ['classic', 'emerald', 'crimson', 'imperial', 'cosmic'])
+        && data.status == 'pending'
+        && data.createdAt is timestamp;
+    }
+
+    function isValidFriendship(data, pairId) {
+      return data.keys().hasAll(['id', 'uidA', 'uidB', 'members', 'profiles', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'uidA', 'uidB', 'members', 'profiles', 'createdAt', 'updatedAt'])
+        && isValidPairId(data.id) && data.id == pairId
+        && isValidId(data.uidA) && isValidId(data.uidB) && data.uidA != data.uidB
+        && data.members is list && data.members.size() == 2
+        && data.members[0] == data.uidA && data.members[1] == data.uidB
+        && request.auth.uid in data.members
+        && data.profiles is map && data.profiles.size() <= 2
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidGameInvite(data, inviteId) {
+      return data.keys().hasAll([
+          'id', 'fromUid', 'fromNickname', 'fromAvatarColor', 'fromAvatarSymbol',
+          'fromEol', 'toUid', 'variantName', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'fromUid', 'fromNickname', 'fromAvatarColor', 'fromAvatarSymbol',
+          'fromEol', 'toUid', 'variantId', 'variantName', 'roomCode', 'roomId', 'createdAt'
+        ])
+        && isValidId(data.id) && data.id == inviteId
+        && isValidId(data.fromUid) && data.fromUid == request.auth.uid
+        && isValidId(data.toUid) && data.toUid != request.auth.uid
+        && data.fromNickname is string && data.fromNickname.size() >= 1 && data.fromNickname.size() <= 32
+        && isHexColor(data.fromAvatarColor)
+        && data.fromAvatarSymbol is string && data.fromAvatarSymbol.size() >= 1 && data.fromAvatarSymbol.size() <= 8
+        && data.fromEol is number && data.fromEol >= 100 && data.fromEol <= 5000
+        && (!('variantId' in data) || data.variantId == null || isValidId(data.variantId))
+        && data.variantName is string && data.variantName.size() >= 1 && data.variantName.size() <= 80
+        && (!('roomCode' in data) || data.roomCode == null || (data.roomCode is string && data.roomCode.size() <= 24))
+        && (!('roomId' in data) || data.roomId == null || isValidId(data.roomId))
+        && data.createdAt is timestamp;
     }
 
     function isValidVariant(data) {
@@ -203,7 +380,7 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'playerUid', 'mode', 'variantId', 'variantName',
-          'opponentName', 'result', 'movesCount', 'deltaEol', 'createdAt'
+          'opponentName', 'opponentUid', 'result', 'movesCount', 'deltaEol', 'createdAt'
         ])
         && isValidId(data.id) && data.id == gameId
         && isValidId(data.playerUid) && data.playerUid == userId && data.playerUid == request.auth.uid
@@ -211,6 +388,7 @@ service cloud.firestore {
         && (!('variantId' in data) || data.variantId == null || isValidId(data.variantId))
         && data.variantName is string && data.variantName.size() >= 1 && data.variantName.size() <= 80
         && data.opponentName is string && data.opponentName.size() >= 1 && data.opponentName.size() <= 48
+        && (!('opponentUid' in data) || data.opponentUid == null || isValidId(data.opponentUid))
         && data.result in ['win', 'loss', 'draw', 'saved']
         && data.movesCount is int && data.movesCount >= 0 && data.movesCount <= 5000
         && data.deltaEol is number && data.deltaEol >= -200 && data.deltaEol <= 200
@@ -238,7 +416,9 @@ service cloud.firestore {
           'eol', 'gamesPlayed', 'wins', 'draws', 'losses',
           'discoveredVariants', 'loginStreak', 'bestLoginStreak',
           'lastStreakDate', 'botChallenges', 'botRebellionUnlocked',
-          'updatedAt'
+          'goldCoins', 'goldEffectIds', 'gold100Choice', 'gold1000Choice',
+          'customGoldTitle', 'equippedTitle', 'equippedStreakPiece',
+          'battleCardStyle', 'showBattleIntro', 'updatedAt'
         ]);
       allow delete: if isOwner(userId) && isValidId(userId);
 
@@ -271,6 +451,152 @@ service cloud.firestore {
           'eol', 'gamesPlayed', 'wins', 'isPublic', 'updatedAt'
         ]);
       allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    match /publicProfiles/{userId} {
+      allow get: if isValidId(userId) && (resource.data.isPublic == true || isOwner(userId));
+      allow list: if resource.data.isPublic == true;
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidPublicPlayerProfile(incoming(), userId)
+        && incoming().lastSeenAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidPublicPlayerProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().lastSeenAt == request.time
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'nickname', 'avatarColor', 'avatarSymbol',
+          'eol', 'gamesPlayed', 'wins', 'loginStreak', 'bestLoginStreak',
+          'goldCoins', 'unlockedTitles', 'equippedTitle', 'streakPieceSymbol',
+          'streakPieceLabel', 'battleCardStyle', 'isOnline', 'isPublic',
+          'lastSeenAt', 'updatedAt'
+        ]);
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    match /publicPieces/{pieceId} {
+      allow get: if isValidId(pieceId) && (
+        resource.data.visibility == 'public'
+        || (isSignedIn() && resource.data.creatorUid == request.auth.uid)
+      );
+      allow list: if resource.data.visibility == 'public'
+        || (isSignedIn() && resource.data.creatorUid == request.auth.uid);
+      allow create: if isVerifiedUser()
+        && isValidId(pieceId)
+        && isValidPublicPiece(incoming(), pieceId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(pieceId)
+        && existing().creatorUid == request.auth.uid
+        && isValidPublicPiece(incoming(), pieceId)
+        && incoming().id == existing().id
+        && incoming().creatorUid == existing().creatorUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'symbol', 'visibility', 'moves', 'customMoves',
+          'powerType', 'powers', 'conditions', 'limits', 'limitsText',
+          'texture', 'light', 'dark', 'description', 'creator', 'updatedAt'
+        ]);
+      allow delete: if isVerifiedUser()
+        && isValidId(pieceId)
+        && existing().creatorUid == request.auth.uid;
+    }
+
+    match /publicBoards/{boardId} {
+      allow get: if isValidId(boardId) && (
+        resource.data.visibility == 'public'
+        || (isSignedIn() && resource.data.creatorUid == request.auth.uid)
+      );
+      allow list: if resource.data.visibility == 'public'
+        || (isSignedIn() && resource.data.creatorUid == request.auth.uid);
+      allow create: if isVerifiedUser()
+        && isValidId(boardId)
+        && isValidPublicBoard(incoming(), boardId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(boardId)
+        && existing().creatorUid == request.auth.uid
+        && isValidPublicBoard(incoming(), boardId)
+        && incoming().id == existing().id
+        && incoming().creatorUid == existing().creatorUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'visibility', 'rows', 'cols', 'cells', 'blocked',
+          'special', 'specialEffectType', 'specialEffect', 'texture',
+          'light', 'dark', 'rotation', 'creator', 'updatedAt'
+        ]);
+      allow delete: if isVerifiedUser()
+        && isValidId(boardId)
+        && existing().creatorUid == request.auth.uid;
+    }
+
+    match /friendRequests/{requestId} {
+      allow get: if isVerifiedUser() && isValidId(requestId) && (
+        resource.data.fromUid == request.auth.uid
+        || resource.data.toUid == request.auth.uid
+      );
+      allow list: if isVerifiedUser() && (
+        resource.data.fromUid == request.auth.uid
+        || resource.data.toUid == request.auth.uid
+      );
+      allow create: if isVerifiedUser()
+        && isValidId(requestId)
+        && isValidFriendRequest(incoming(), requestId)
+        && incoming().createdAt == request.time;
+      allow delete: if isVerifiedUser()
+        && isValidId(requestId)
+        && (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+    }
+
+    match /friendships/{pairId} {
+      allow get: if isVerifiedUser() && isValidPairId(pairId) && (
+        request.auth.uid in resource.data.members
+      );
+      allow list: if isVerifiedUser() && request.auth.uid in resource.data.members;
+      allow create: if isVerifiedUser()
+        && isValidPairId(pairId)
+        && isValidFriendship(incoming(), pairId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidPairId(pairId)
+        && request.auth.uid in existing().members
+        && isValidFriendship(incoming(), pairId)
+        && incoming().id == existing().id
+        && incoming().uidA == existing().uidA
+        && incoming().uidB == existing().uidB
+        && incoming().members == existing().members
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['profiles', 'updatedAt']);
+      allow delete: if isVerifiedUser()
+        && isValidPairId(pairId)
+        && request.auth.uid in existing().members;
+    }
+
+    match /gameInvites/{inviteId} {
+      allow get: if isVerifiedUser() && isValidId(inviteId) && (
+        resource.data.fromUid == request.auth.uid
+        || resource.data.toUid == request.auth.uid
+      );
+      allow list: if isVerifiedUser() && (
+        resource.data.fromUid == request.auth.uid
+        || resource.data.toUid == request.auth.uid
+      );
+      allow create: if isVerifiedUser()
+        && isValidId(inviteId)
+        && isValidGameInvite(incoming(), inviteId)
+        && incoming().createdAt == request.time;
+      allow delete: if isVerifiedUser()
+        && isValidId(inviteId)
+        && (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
     }
 
     match /variants/{variantId} {

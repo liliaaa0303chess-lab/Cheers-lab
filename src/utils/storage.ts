@@ -29,6 +29,16 @@ export function createDefaultProfile(): Profile {
     loginStreak: 0,
     bestLoginStreak: 0,
     lastStreakDate: '',
+    goldCoins: 0,
+    goldEffectIds: undefined,
+    gold100Choice: null,
+    gold1000Choice: undefined,
+    customGoldTitle: '',
+    equippedTitle: undefined,
+    equippedStreakPiece: '♙',
+    battleCardStyle: 'classic',
+    showBattleIntro: true,
+    friends: [],
     botChallenges: {},
     botRebellionUnlocked: false,
     createdAt: new Date().toISOString(),
@@ -71,21 +81,45 @@ export function loadLocalState(): AppState {
     const parsed = JSON.parse(raw) as Partial<AppState>;
     const blank = createBlankState();
 
+    try {
+      localStorage.removeItem('chesslab_demo_friend_v1');
+    } catch {
+      // ignore
+    }
+
     // Validate & sanitize stored variants/pieces/boards/history so a malformed record never crashes render
     const validVariants = Array.isArray(parsed.variants)
       ? parsed.variants.filter(
           (v): v is Variant =>
-            Boolean(v && typeof v.id === 'string' && v.board && Array.isArray(v.board.cells))
+            Boolean(
+              v &&
+                typeof v.id === 'string' &&
+                v.id !== 'demo_var_lucas' &&
+                v.creatorId !== 'demo_friend_lucas' &&
+                v.board &&
+                Array.isArray(v.board.cells)
+            )
         )
       : [];
     const validPieces = Array.isArray(parsed.pieces)
-      ? parsed.pieces.filter((p): p is PieceDef => Boolean(p && typeof p.id === 'string' && p.name))
+      ? parsed.pieces.filter(
+          (p): p is PieceDef =>
+            Boolean(p && typeof p.id === 'string' && p.id !== 'demo_piece_paladin' && p.name)
+        )
       : [];
     const validBoards = Array.isArray(parsed.boards)
       ? parsed.boards.filter((b): b is BoardConfig => Boolean(b && Array.isArray(b.cells)))
       : [];
     const validHistory = Array.isArray(parsed.history)
-      ? parsed.history.filter((h): h is GameRecord => Boolean(h && typeof h.id === 'string'))
+      ? parsed.history.filter(
+          (h): h is GameRecord =>
+            Boolean(
+              h &&
+                typeof h.id === 'string' &&
+                h.id !== 'demo_hist_lucas_1' &&
+                h.opponentUid !== 'demo_friend_lucas'
+            )
+        )
       : [];
 
     const mergedVariants = validVariants.length > 0 ? validVariants : blank.variants;
@@ -94,6 +128,9 @@ export function loadLocalState(): AppState {
     const mergedProfile: Profile = {
       ...blank.profile,
       ...(parsed.profile || {}),
+      friends: Array.isArray(parsed.profile?.friends)
+        ? parsed.profile.friends.filter((f) => f && f.uid !== 'demo_friend_lucas')
+        : [],
       botChallenges:
         parsed.profile?.botChallenges && typeof parsed.profile.botChallenges === 'object'
           ? parsed.profile.botChallenges

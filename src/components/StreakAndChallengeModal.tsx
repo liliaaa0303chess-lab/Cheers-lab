@@ -7,7 +7,8 @@ import {
   CHALLENGE_VARIANTS,
   getBotChallengeProgress,
 } from '../utils/botChallenge';
-import { getStreakRank } from '../utils/streaks';
+import { getStreakRank, getStreakRewardSummary } from '../utils/streaks';
+import { ChessPieceArtwork } from './ChessPieceArtwork';
 
 interface StreakAndChallengeModalProps {
   open: boolean;
@@ -40,6 +41,8 @@ export const StreakAndChallengeModal: React.FC<StreakAndChallengeModalProps> = (
   const streak = Math.max(1, profile.loginStreak || 1);
   const bestStreak = Math.max(streak, profile.bestLoginStreak || 1);
   const { current: rank } = getStreakRank(streak);
+  const todayReward = getStreakRewardSummary(streak);
+  const goldCoins = Math.max(0, Math.trunc(profile.goldCoins || 0));
   const botProg = getBotChallengeProgress(profile);
   const effectiveTab = botsUnlocked ? tab : 'streak';
 
@@ -72,24 +75,30 @@ export const StreakAndChallengeModal: React.FC<StreakAndChallengeModalProps> = (
             <button
               type="button"
               onClick={() => setTab('streak')}
-              className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors ${
+              className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 ${
                 effectiveTab === 'streak'
                   ? 'bg-white dark:bg-[#1a2333] text-slate-900 dark:text-white shadow-sm'
                   : 'text-slate-500 dark:text-slate-400 hover:text-slate-200'
               }`}
             >
-              {rank.symbol} Série ({streak} j)
+              <span className="w-4 h-4 shrink-0 inline-flex items-center justify-center">
+                <ChessPieceArtwork symbol={rank.symbol} side="gold" mode="board" />
+              </span>
+              <span>Série ({streak} j)</span>
             </button>
             <button
               type="button"
               onClick={() => setTab('bots')}
-              className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors ${
+              className={`py-2 px-3 rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 ${
                 effectiveTab === 'bots'
                   ? 'bg-white dark:bg-[#1a2333] text-slate-900 dark:text-white shadow-sm'
                   : 'text-slate-500 dark:text-slate-400 hover:text-slate-200'
               }`}
             >
-              🦄 La Grève des 8 Bots
+              <span className="w-4 h-4 shrink-0 inline-flex items-center justify-center">
+                <ChessPieceArtwork symbol="🦄" side="gold" mode="board" />
+              </span>
+              <span>La Grève des 8 Bots</span>
             </button>
           </div>
         )}
@@ -100,8 +109,8 @@ export const StreakAndChallengeModal: React.FC<StreakAndChallengeModalProps> = (
               className={`rounded-xl border p-4 flex items-center justify-between gap-3 ${rank.bgClass} ${rank.borderClass}`}
             >
               <div className="flex items-center gap-3.5 min-w-0">
-                <span className="w-14 h-14 rounded-xl bg-slate-950/50 border border-white/10 flex items-center justify-center text-3xl shrink-0">
-                  {rank.symbol}
+                <span className="w-14 h-14 rounded-xl bg-slate-950/50 border border-white/10 flex items-center justify-center p-2 shrink-0">
+                  <ChessPieceArtwork symbol={rank.symbol} side="gold" mode="board" />
                 </span>
                 <div className="min-w-0 space-y-0.5">
                   <div className={`text-lg font-bold font-mono-num ${rank.colorClass}`}>
@@ -117,17 +126,25 @@ export const StreakAndChallengeModal: React.FC<StreakAndChallengeModalProps> = (
               </div>
             </div>
 
-            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0f151f] p-4 space-y-2">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-900 dark:text-slate-100">
-                <Award className="w-4 h-4 text-sky-400 shrink-0" />
-                <span>Récompense de transformation ({rank.symbol} {rank.title})</span>
-              </div>
-              <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                Emblème actif sur votre profil :{' '}
-                <span className="font-semibold text-slate-800 dark:text-slate-200">
-                  {rank.symbol} {rank.title}
+            <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#0f151f] p-4 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  <Award className="w-4 h-4 text-sky-400 shrink-0" />
+                  <span>Récompense du palier ({rank.title})</span>
+                </div>
+                <span className="text-xs font-mono-num font-bold text-amber-400">
+                  {goldCoins} Pièces d’or
                 </span>
-                . Revenez chaque jour sur Chess Lab pour faire évoluer votre pièce et découvrir la suite par vous-même.
+              </div>
+              <p className="text-xs text-slate-700 dark:text-slate-300 font-medium">
+                {todayReward.rewardLabel}
+              </p>
+              <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                Emblème actif sur votre carte de combat :{' '}
+                <span className="font-semibold text-slate-800 dark:text-slate-200">
+                  {rank.title}
+                </span>
+                . Personnalisez vos récompenses et effets dans <span className="font-semibold">Paramètres → Pièces d’or</span>.
               </p>
             </div>
           </div>
